@@ -7,9 +7,36 @@ import json
 from io import BytesIO
 import base64
 import os
+import sys
 import tempfile
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+
+# Fix poppler path for Codespaces
+poppler_paths = [
+    "/usr/bin",
+    "/usr/local/bin",
+    "/bin",
+]
+
+for path in poppler_paths:
+    poppler_test = os.path.join(path, "pdfinfo")
+    if os.path.exists(poppler_test):
+        os.environ["PATH"] = path + ":" + os.environ.get("PATH", "")
+        print(f"✅ Found poppler at: {path}")
+        break
+
+# Fix tesseract path
+tesseract_paths = [
+    "/usr/bin/tesseract",
+    "/usr/local/bin/tesseract",
+]
+
+for path in tesseract_paths:
+    if os.path.exists(path):
+        os.environ["TESSERACT_CMD"] = path
+        print(f"✅ Found tesseract at: {path}")
+        break
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
 st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
@@ -48,6 +75,15 @@ with st.sidebar:
     
     st.header("📁 Upload")
     uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")
+
+    st.header("🔧 Diagnostics")
+    if st.button("Check Dependencies"):
+        deps = check_dependencies()
+        for name, status in deps.items():
+            if "✅" in status:
+                st.success(f"{name}: {status}")
+            else:
+                st.error(f"{name}: {status}")
 
 def debug_extract_comment_section(text, room_number):
     """Extract and return the exact comment section with boundaries"""
@@ -212,7 +248,7 @@ def highlight_pdf_with_boxes(pdf_bytes, rooms_data, dpi=150):
     progress_bar.empty()
     return highlighted_images
 
-def highlight_with_ocr(pdf_bytes, rooms_data, dpi=200):
+def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
     """
     Advanced highlighting using OCR to find exact room positions
     """
@@ -221,54 +257,136 @@ def highlight_with_ocr(pdf_bytes, rooms_data, dpi=200):
         import pytesseract
         import cv2
         import numpy as np
-    except ImportError:
-        st.error("Missing libraries. Run: pip install pytesseract opencv-python")
+    except ImportError as e:
+        st.error(f"Missing library: {e}")
+        st.info("Run: pip install pytesseract opencv-python-headless pdf2image")
+        return None
+    
+    # Try to find poppler manually
+    import subprocess
+    try:
+        # Test if poppler is accessible
+        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
+        st.write("✅ Poppler found")
+    except FileNotFoundError:
+        st.error("Poppler not found. Please run: sudo apt install poppler-utils")
         return None
     
     # Convert PDF to images
     with st.spinner("Converting PDF to images for OCR (can take 1-2 minutes)..."):
-        images = convert_from_bytes(pdf_bytes, dpi=dpi)
+        try:
+            images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt='jpeg')
+            st.write(f"✅ Converted {len(images)} pages")
+        except Exception as e:
+            st.error(f"PDF conversion failed: {e}")
+            return None
     
     highlighted_images = []
-    room_status = {room['room']: room['status'] for room in rooms_data}
+    room_status = {str(room['room']): room['status'] for room in rooms_data}
+    
+    # Also check for room numbers with leading zeros
+    room_status_variants = {}
+    for room_num, status in room_status.items():
+        room_status_variants[room_num] = status
+        room_status_variants[room_num.lstrip('0')] = status  # "403" vs "0403"
     
     for page_num, image in enumerate(images):
+        st.write(f"Processing page {page_num + 1} of {len(images)}...")
+        
         # Convert PIL to OpenCV
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         
         # Run OCR to find text positions
         data = pytesseract.image_to_data(img_cv, output_type=pytesseract.Output.DICT)
         
+        boxes_drawn = 0
+        
         # Draw boxes around each room number
         for i, text in enumerate(data['text']):
-            room_num_str = text.strip()
-            if room_num_str in room_status:
+            text_clean = text.strip()
+            
+            # Check exact match or variant
+            status = None
+            if text_clean in room_status:
+                status = room_status[text_clean]
+            elif text_clean in room_status_variants:
+                status = room_status_variants[text_clean]
+            
+            if status:
                 x = data['left'][i]
                 y = data['top'][i]
                 w = data['width'][i]
                 h = data['height'][i]
                 
-                status = room_status[room_num_str]
                 if status == 'fix':
                     color = (0, 0, 255)  # RED (BGR)
-                    thickness = 3
+                    thickness = 4
+                    label = "FIX"
                 elif status == 'manual_check':
                     color = (0, 255, 255)  # YELLOW (BGR)
-                    thickness = 3
+                    thickness = 4
+                    label = "CHECK"
                 else:
                     color = (0, 255, 0)  # GREEN
-                    thickness = 1
+                    thickness = 2
+                    label = "OK"
                 
+                # Draw rectangle
                 cv2.rectangle(img_cv, (x, y), (x + w, y + h), color, thickness)
                 
-                # Add label
-                label = "FIX" if status == 'fix' else "CHECK" if status == 'manual_check' else "OK"
-                cv2.putText(img_cv, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                # Draw label background
+                label_bg_color = (0, 0, 0)  # Black background
+                label_font_scale = 0.6
+                label_thickness = 2
+                (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_thickness)
+                cv2.rectangle(img_cv, (x, y - label_h - 4), (x + label_w + 4, y), label_bg_color, -1)
+                
+                # Draw label text
+                cv2.putText(img_cv, label, (x + 2, y - 4), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, color, label_thickness)
+                
+                boxes_drawn += 1
+        
+        # Add page number and stats
+        cv2.putText(img_cv, f"Page {page_num + 1} | Boxes: {boxes_drawn}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Convert back to PIL
         highlighted_images.append(Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)))
     
+    st.success(f"✅ Highlighted {len(highlighted_images)} pages with {sum(1 for r in rooms_data if r['status'] in ['fix', 'manual_check'])} rooms marked")
     return highlighted_images
+
+def check_dependencies():
+    """Check if all required dependencies are available"""
+    import subprocess
+    import importlib
+    
+    results = {}
+    
+    # Check poppler
+    try:
+        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
+        results['poppler'] = "✅ Available"
+    except FileNotFoundError:
+        results['poppler'] = "❌ Not found - run: sudo apt install poppler-utils"
+    
+    # Check tesseract
+    try:
+        result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
+        results['tesseract'] = "✅ Available"
+    except FileNotFoundError:
+        results['tesseract'] = "❌ Not found - run: sudo apt install tesseract-ocr"
+    
+    # Check Python packages
+    packages = ['pdf2image', 'pytesseract', 'cv2', 'PIL']
+    for pkg in packages:
+        try:
+            importlib.import_module(pkg)
+            results[pkg] = "✅ Available"
+        except ImportError:
+            results[pkg] = "❌ Missing - pip install"
+    
+    return results
 
 if uploaded_file:
     pdf_bytes = uploaded_file.getvalue()
