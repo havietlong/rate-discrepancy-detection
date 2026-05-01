@@ -590,51 +590,51 @@ if uploaded_file:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
     # TAB 2: PDF Viewer with Highlighting
-    with tab2:
-        st.subheader("📄 PDF with Room Highlighting")
+    # TAB 2: PDF Viewer with Highlighting
+with tab2:
+    st.subheader("📄 PDF with Room Highlighting")
+    
+    fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
+    manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
+    
+    if highlight_mode == "Visual (red/yellow boxes - slower)":
+        st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
         
-        fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
-        manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
-        
-        if highlight_mode == "Visual (red/yellow boxes - slower)":
-            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
-            
-            # Try OCR-based highlighting first
-            try:
-                with st.spinner("Generating highlighted PDF (this takes time)..."):
-                    highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
+        try:
+            with st.spinner("Generating highlighted PDF (this takes time)..."):
+                highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
+                
+                if highlighted_images:
+                    st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
                     
-                    if highlighted_images:
-                        st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
-                        
-                        # Display images with navigation
-                        page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
-                        st.image(highlighted_images[page_idx - 1], use_container_width=True)
-                        
-                        # Legend
-                        st.markdown("""
-                        **Legend:**
-                        - 🔴 **RED BOX** = Room needs rate change
-                        - 🟡 **YELLOW BOX** = Room needs manual check
-                        """)
-                    else:
-                        st.error("Highlighting failed. Using fallback mode.")
-                        # Fallback to simple PDF viewer
-                        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                        st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" />', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Highlighting error: {e}")
-                st.info("Falling back to standard PDF viewer")
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" />', unsafe_allow_html=True)
-        
-        else:
-            # Fast mode
-            if fix_rooms:
-                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
-            
+                    # Display images with navigation
+                    page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
+                    st.image(highlighted_images[page_idx - 1], use_container_width=True)
+                    
+                    st.markdown("""
+                    **Legend:**
+                    - 🔴 **RED BOX** = Room needs rate change
+                    - 🟡 **YELLOW BOX** = Room needs manual check
+                    """)
+                else:
+                    st.error("Highlighting failed. Using fallback mode.")
+                    # Fallback to safe PDF viewer
+                    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                    st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Highlighting error: {e}")
+            st.info("Falling back to standard PDF viewer")
             base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" />', unsafe_allow_html=True)
+            st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
+    
+    else:
+        # Fast mode - use iframe instead of embed
+        if fix_rooms:
+            st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+        
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        # Use iframe instead of embed to avoid sandbox issues
+        st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
     
     # TAB 3: Training Data
     with tab3:
