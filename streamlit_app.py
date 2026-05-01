@@ -482,19 +482,19 @@ if uploaded_file:
     with tab2:
         st.subheader("📄 PDF Viewer")
     
-    # Add download button FIRST
-        st.download_button(
-            label="📥 Click here to download PDF (test if PDF loads)",
-            data=pdf_bytes,
-            file_name="night_audit_report.pdf",
-            mime="application/pdf"
-        )
+        # Write PDF to a temporary file and display with st.echo
+        import tempfile
         
-        st.markdown("---")
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmpfile:
+            tmpfile.write(pdf_bytes)
+            tmpfile_path = tmpfile.name
         
-        # Then try to display it
-        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-        st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px"></iframe>', unsafe_allow_html=True)
+        # Use Streamlit's built-in PDF viewer
+        with open(tmpfile_path, 'rb') as f:
+            st.download_button("📥 Download PDF", f, file_name="report.pdf")
+        
+        # Try simple embed
+        st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" type="application/pdf">', unsafe_allow_html=True)
         # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
