@@ -4,196 +4,115 @@ import re
 from datetime import datetime
 import pandas as pd
 from io import BytesIO
-import base64
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍")
 st.title("🔍 Rate Discrepancy Scanner - Find & Fix")
 
+TAX_RATE = 1.134  # 13.4% tax (adjust as needed)
+
+st.markdown("### 📅 Select today's date")
+current_date = st.date_input("Current date (for rate comparison)", datetime.now())
+
 uploaded_file = st.file_uploader("📄 Upload Night Audit PDF", type="pdf")
 
-def extract_room_data(text):
+def detect_rate_type_in_comment(comment_text):
     """
-    Extract room-by-room data from PDF.
-    Returns list of rooms with: room_number, guest_name, actual_rate, comment_rate, is_discrepancy
+    Auto-detect if comment mentions net or ++
+    Returns: 'net', 'pp', or None
     """
-    rooms = []
+    comment_lower = comment_text.lower()
     
-    # Pattern for table rows (Room No, Name, actual rate)
-    # Looking for: "0403    Zhou, Xinfei ... 2,285,937 VND"
-    table_pattern = r'(\d{3,4})\s+([A-Za-z][^0-9]{5,40}?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND'
+    # Check for net indicators
+    net_patterns = [r'\bnet\b', r'nett', r'after tax', r'inclusive', r'inc\.? tax']
+    for pattern in net_patterns:
+        if re.search(pattern, comment_lower):
+            return 'net'
     
-    table_matches = re.findall(table_pattern, text, re.IGNORECASE)
+    # Check for ++ indicators
+    pp_patterns = [r'\+\+', r'exclusive', r'excl\.? tax', r'before tax', r'plus tax']
+    for pattern in pp_patterns:
+        if re.search(pattern, comment_lower):
+            return 'pp'
     
-    # Find all rate schedules from comments
-    schedule_pattern = r'RATE\s*AMOUNTH?\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
-    schedules = re.findall(schedule_pattern, text, re.IGNORECASE)
+    return None  # Will determine by comparing values
+
+def determine_rate_type_by_comparison(comment_rate, system_rate):
+    """
+    If comment doesn't explicitly say net or ++,
+    determine by comparing values:
+    - If comment_rate > system_rate → likely net
+    - If comment_rate ≈ system_rate → likely ++
+    """
+    if comment_rate > system_rate * 1.05:  # More than 5% higher
+        return 'net'
+    else:
+        return 'pp'
+
+def parse_rate_for_date(text, target_date):
+    """
+    Find the applicable rate for target_date.
+    Returns: (rate_value, rate_source_description)
+    """
     
-    # Calculate average daily rate from comment schedule if multiple periods exist
-    comment_daily_rate = None
-    if schedules:
-        total_amount = 0
-        total_nights = 0
-        for rate, start, end in schedules:
-            rate_val = float(rate.replace(',', ''))
-            try:
-                start_date = datetime.strptime(start, '%d-%b-%y')
-                end_date = datetime.strptime(end, '%d-%b-%y')
-                nights = (end_date - start_date).days
-                if nights > 0:
-                    total_amount += rate_val * nights
-                    total_nights += nights
-            except:
-                pass
-        if total_nights > 0:
-            comment_daily_rate = total_amount / total_nights
+    # Skip monthly rates
+    monthly_pattern = r'[\d,]+\s*(?:net)?/?\s*(?:per\s+)?month'
+    if re.search(monthly_pattern, text, re.IGNORECASE):
+        return None, "SKIP - Monthly rate"
     
-    # Match each room with its actual rate
-    for room_num, guest_name, actual_rate_str in table_matches:
-        actual_rate = float(actual_rate_str.replace(',', ''))
-        
-        # Try to find comment rate for this specific room
-        room_comment_rate = None
-        
-        # Look for comment section near this room
-        room_pattern = rf'{room_num}.*?RATE\s*AMOUNTH?\s*->([\d,]+)'
-        room_specific = re.search(room_pattern, text, re.IGNORECASE | re.DOTALL)
-        if room_specific:
-            room_comment_rate = float(room_specific.group(1).replace(',', ''))
-        elif comment_daily_rate:
-            room_comment_rate = comment_daily_rate
-        
-        # Determine discrepancy
-        is_discrepancy = False
-        difference = 0
-        
-        if room_comment_rate:
-            difference = actual_rate - room_comment_rate
-            # Allow 1% tolerance for rounding
-            if abs(difference) > (room_comment_rate * 0.01):
-                is_discrepancy = True
-        
-        rooms.append({
+    # CASE 1: Date-specific rates
+    date_pattern = r'RATE\s*AMOUNTH?\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
+    matches = re.findall(date_pattern, text, re.IGNORECASE)
+    
+    for rate_str, start_str, end_str in matches:
+        rate = float(rate_str.replace(',', ''))
+        try:
+            start_date = datetime.strptime(start_str, '%d-%b-%y')
+            end_date = datetime.strptime(end_str, '%d-%b-%y')
+            if start_date <= target_date <= end_date:
+                return rate, f"Date-specific: {start_str} to {end_str}"
+        except:
+            continue
+    
+    # CASE 2: Flat rate
+    flat_pattern = r'RATE\s*AMOUNTH?\s*->([\d,]+)(?:\s|$|\.)'
+    flat_match = re.search(flat_pattern, text, re.IGNORECASE)
+    if flat_match:
+        rate = float(flat_match.group(1).replace(',', ''))
+        return rate, "Flat rate"
+    
+    return None, "No rate found"
+
+def extract_room_actual_rates(text):
+    """Extract each room's actual posted rate from system table"""
+    rooms = {}
+    
+    # Pattern: "0403    Zhou, Xinfei ... 2,285,937 VND"
+    pattern = r'(\d{3,4})\s+([A-Za-z][^0-9]{5,60}?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND'
+    
+    matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+    
+    for room_num, guest_name, rate_str in matches:
+        actual_rate = float(rate_str.replace(',', ''))
+        rooms[room_num] = {
             'room': room_num,
-            'guest': guest_name.strip(),
-            'actual_rate': actual_rate,
-            'comment_rate': room_comment_rate if room_comment_rate else 0,
-            'difference': difference,
-            'discrepancy': is_discrepancy
-        })
+            'guest': guest_name.strip()[:35],
+            'system_rate': actual_rate
+        }
     
     return rooms
 
-def highlight_pdf_discrepancies(pdf_bytes, rooms_with_discrepancies):
-    """
-    Generate HTML that displays PDF with highlighted rows
-    Since we can't directly edit PDFs easily in browser,
-    we'll create an HTML overlay that highlights the PDF
-    """
-    
-    # Convert PDF to base64 for embedding
-    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-    
-    # Get room numbers that have discrepancies
-    discrepant_rooms = [r['room'] for r in rooms_with_discrepancies if r['discrepancy']]
-    
-    # Create HTML with JavaScript to highlight specific text (room numbers)
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Highlighted PDF - Discrepancies in Red</title>
-        <style>
-            body {{
-                margin: 0;
-                padding: 20px;
-                background: #f0f0f0;
-                font-family: Arial, sans-serif;
-            }}
-            .container {{
-                position: relative;
-                width: 100%;
-                max-width: 1200px;
-                margin: 0 auto;
-            }}
-            .discrepancy-list {{
-                background: #fff3cd;
-                border: 1px solid #ffc107;
-                padding: 15px;
-                margin-bottom: 20px;
-                border-radius: 5px;
-            }}
-            .discrepancy-list h3 {{
-                margin: 0 0 10px 0;
-                color: #856404;
-            }}
-            .discrepancy-list ul {{
-                margin: 0;
-            }}
-            .discrepancy-list li {{
-                color: #dc3545;
-                font-weight: bold;
-            }}
-            .pdf-container {{
-                position: relative;
-                width: 100%;
-                background: white;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }}
-            embed, iframe {{
-                width: 100%;
-                height: 800px;
-                border: none;
-            }}
-            .highlight-instruction {{
-                background: #d4edda;
-                border: 1px solid #28a745;
-                padding: 10px;
-                margin-bottom: 15px;
-                border-radius: 5px;
-                font-size: 14px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="discrepancy-list">
-                <h3>⚠️ Rooms with Rate Discrepancies (Fix These):</h3>
-                <ul>
-                    {''.join([f'<li>Room {r["room"]} - {r["guest"]}: Actual {r["actual_rate"]:,.0f} VND vs Comment {r["comment_rate"]:,.0f} VND (Diff: {r["difference"]:+,.0f})</li>' for r in rooms_with_discrepancies if r["discrepancy"]])}
-                </ul>
-            </div>
-            
-            <div class="highlight-instruction">
-                <strong>🔍 How to find discrepancies in the PDF:</strong><br>
-                Look for these room numbers in the PDF below. They appear in the table rows:
-                <strong style="color:#dc3545">{', '.join(discrepant_rooms)}</strong>
-            </div>
-            
-            <div class="pdf-container">
-                <embed src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" 
-                       type="application/pdf"
-                       width="100%"
-                       height="800px" />
-            </div>
-        </div>
-        
-        <script>
-            // Try to highlight text in PDF viewer (works in some browsers)
-            console.log("PDF loaded. Search for room numbers: {', '.join(discrepant_rooms)}");
-            // Note: Native PDF highlighting requires PDF.js integration
-            // For now, use browser's Find feature (Ctrl+F)
-        </script>
-    </body>
-    </html>
-    """
-    
-    return html_content
+def get_comment_section_for_room(text, room_number):
+    """Extract the comment section for a specific room"""
+    pattern = rf'{room_number}\s+[^\n]+\n(.*?)(?=\n\d{{3,4}}\s+|\Z)'
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(0)
+    return text
 
 if uploaded_file:
-    # Read the PDF file
     pdf_bytes = uploaded_file.getvalue()
     
-    with st.spinner("Scanning for discrepancies..."):
+    with st.spinner(f"Scanning for discrepancies based on {current_date.strftime('%B %d, %Y')}..."):
         # Extract text from PDF
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             full_text = ""
@@ -202,55 +121,121 @@ if uploaded_file:
                 if extracted:
                     full_text += extracted + "\n"
         
-        # Extract room data and find discrepancies
-        rooms = extract_room_data(full_text)
+        # Get actual rates from system
+        rooms_actual = extract_room_actual_rates(full_text)
         
-        if rooms:
-            # Convert to DataFrame for display
-            df = pd.DataFrame(rooms)
+        target_datetime = datetime(current_date.year, current_date.month, current_date.day)
+        
+        # Results containers
+        discrepancies = []
+        skipped_monthly = []
+        no_rate_found = []
+        
+        for room_num, room_data in rooms_actual.items():
+            system_rate = room_data['system_rate']
             
-            # Show summary
-            discrepancy_count = df['discrepancy'].sum()
+            # Get comment section for this room
+            comment_section = get_comment_section_for_room(full_text, room_num)
             
-            st.subheader("📊 Discrepancy Summary")
+            # Find comment rate
+            comment_rate, rate_source = parse_rate_for_date(comment_section, target_datetime)
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Rooms", len(rooms))
-            with col2:
-                st.metric("Rooms with Issues", discrepancy_count)
-            with col3:
-                if discrepancy_count > 0:
-                    st.metric("⚠️ Fix Needed", "YES", delta_color="off")
+            if comment_rate is None:
+                if "monthly" in rate_source.lower():
+                    skipped_monthly.append({
+                        'room': room_num,
+                        'guest': room_data['guest'],
+                        'system_rate': system_rate,
+                    })
+                else:
+                    no_rate_found.append({
+                        'room': room_num,
+                        'guest': room_data['guest'],
+                        'system_rate': system_rate,
+                    })
+                continue
             
-            # Show table of discrepancies
-            if discrepancy_count > 0:
-                st.error(f"⚠️ Found {discrepancy_count} room(s) with rate discrepancies")
-                discrepant_df = df[df['discrepancy'] == True][['room', 'guest', 'actual_rate', 'comment_rate', 'difference']]
-                st.dataframe(discrepant_df)
-                
-                # Generate HTML with PDF highlighting
-                st.subheader("📄 PDF with Highlighted Discrepancies")
-                st.markdown("**Look for the red-highlighted room numbers in the table rows below:**")
-                
-                html_content = highlight_pdf_discrepancies(pdf_bytes, rooms)
-                
-                # Display the HTML
-                st.components.v1.html(html_content, height=1000, scrolling=True)
-                
-                # Download option
-                st.download_button(
-                    label="📥 Download Highlighted PDF Report (HTML)",
-                    data=html_content,
-                    file_name="discrepancy_report.html",
-                    mime="text/html"
-                )
-                
-            else:
-                st.success("✅ No discrepancies found! All rates match.")
-                # Show PDF anyway
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" />', 
-                           unsafe_allow_html=True)
+            # Detect comment rate type
+            comment_type = detect_rate_type_in_comment(comment_section)
+            
+            # If still unknown, determine by comparison
+            if comment_type is None:
+                comment_type = determine_rate_type_by_comparison(comment_rate, system_rate)
+            
+            # COMPARISON LOGIC
+            is_discrepancy = False
+            expected_rate = None
+            explanation = ""
+            
+            if comment_type == 'pp':
+                # Comment is ++, should EQUAL system rate
+                tolerance = comment_rate * 0.01  # 1% tolerance
+                if abs(comment_rate - system_rate) > tolerance:
+                    is_discrepancy = True
+                    expected_rate = comment_rate
+                    explanation = f"Comment says ++ {comment_rate:,.0f} but system shows {system_rate:,.0f} (should be equal)"
+                else:
+                    explanation = f"✅ ++ rate matches: {comment_rate:,.0f}"
+            
+            else:  # 'net'
+                # Comment is NET, should be HIGHER than system (since net includes tax)
+                if comment_rate <= system_rate:
+                    is_discrepancy = True
+                    expected_rate = comment_rate  # This is net, but system needs to be adjusted?
+                    explanation = f"⚠️ Comment NET {comment_rate:,.0f} is NOT higher than system ++ {system_rate:,.0f} (net should include tax)"
+                else:
+                    # Net is higher - this is normal, but we can still check if it matches expected tax calculation
+                    expected_pp = comment_rate / TAX_RATE
+                    tolerance = expected_pp * 0.02  # 2% tolerance
+                    if abs(expected_pp - system_rate) > tolerance:
+                        is_discrepancy = True
+                        explanation = f"Comment NET {comment_rate:,.0f} should be ++ {expected_pp:,.0f} after tax, but system shows {system_rate:,.0f}"
+                    else:
+                        explanation = f"✅ NET rate {comment_rate:,.0f} correctly converts to ++ {system_rate:,.0f}"
+            
+            if is_discrepancy:
+                discrepancies.append({
+                    'room': room_num,
+                    'guest': room_data['guest'],
+                    'system_rate_pp': system_rate,
+                    'comment_rate': comment_rate,
+                    'comment_type': comment_type.upper(),
+                    'rate_source': rate_source,
+                    'difference': system_rate - comment_rate if comment_type == 'pp' else system_rate - (comment_rate / TAX_RATE),
+                    'explanation': explanation,
+                    'action': '🔧 FIX RATE'
+                })
+        
+        # DISPLAY RESULTS
+        st.subheader(f"📅 Discrepancies for {current_date.strftime('%B %d, %Y')}")
+        
+        if discrepancies:
+            st.error(f"⚠️ {len(discrepancies)} room(s) need attention")
+            
+            df = pd.DataFrame(discrepancies)
+            df['system_rate_pp'] = df['system_rate_pp'].apply(lambda x: f"{x:,.0f} VND")
+            df['comment_rate'] = df['comment_rate'].apply(lambda x: f"{x:,.0f} VND")
+            df['difference'] = df['difference'].apply(lambda x: f"{x:+,.0f} VND")
+            
+            st.dataframe(df[['room', 'guest', 'system_rate_pp', 'comment_rate', 'comment_type', 'explanation', 'action']])
+            
+            # Simple fix list
+            st.markdown("---")
+            st.subheader("🔧 Rooms to Fix")
+            for d in discrepancies:
+                st.markdown(f"- **Room {d['room']}** ({d['guest']}): {d['explanation']}")
+            
+            fix_list = [str(d['room']) for d in discrepancies]
+            st.code(f"Fix these rooms: {', '.join(fix_list)}", language="text")
+            
         else:
-            st.warning("Could not extract room data from PDF. Please check the format.")
+            st.success("✅ No discrepancies found! All rates are correct.")
+        
+        # Summary
+        if skipped_monthly:
+            st.info(f"📆 {len(skipped_monthly)} monthly guest(s) - skipped")
+        
+        if no_rate_found:
+            st.warning(f"❓ {len(no_rate_found)} room(s) with no rate in comments")
+        
+        st.caption(f"Total: {len(rooms_actual)} rooms | Issues: {len(discrepancies)} | Monthly: {len(skipped_monthly)} | No rate: {len(no_rate_found)}")
