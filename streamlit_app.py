@@ -72,7 +72,7 @@ def debug_parse_rates(comment_text, target_date):
     date_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
     matches = re.findall(date_pattern, comment_text, re.IGNORECASE)
     
-    st.write(f"DEBUG: Found {len(matches)} date-specific rate matches")  # Temporary debug
+    # st.write(f"DEBUG: Found {len(matches)} date-specific rate matches")  # Temporary debug
     
     for rate_str, start_str, end_str in matches:
         rate = float(rate_str.replace(',', ''))
@@ -123,7 +123,7 @@ def extract_room_actual_rates(text):
     # Multiple patterns to handle different formats
     patterns = [
         r'(\d{3,4})\s+([A-Za-z][^0-9]{5,60}?)\s+.*?([\d,]+)\s+VND',
-        r'(\d{3,4})\s+([A-Za-z][^,]+?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND',
+        # r'(\d{3,4})\s+([A-Za-z][^,]+?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND',
     ]
     
     for pattern in patterns:
