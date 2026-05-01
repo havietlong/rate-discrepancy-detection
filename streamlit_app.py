@@ -5,28 +5,40 @@ from datetime import datetime
 import pandas as pd
 import json
 from io import BytesIO
+import base64
 import os
+import tempfile
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
-st.title("🔍 Rate Discrepancy Scanner - Debug & Train")
+st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
 
 TAX_RATE = 1.134
 
-# Initialize session state for manual overrides
+# Initialize session state
 if 'overrides' not in st.session_state:
     st.session_state.overrides = {}
 if 'processed_rooms' not in st.session_state:
     st.session_state.processed_rooms = {}
 if 'training_data' not in st.session_state:
-    st.session_state.training_data = []
+    st.session_state.training_data = {}
+if 'selected_room' not in st.session_state:
+    st.session_state.selected_room = None
 
-# Sidebar for controls
+# Sidebar
 with st.sidebar:
     st.header("📅 Settings")
     current_date = st.date_input("Today's date", datetime.now())
     
     st.header("⚙️ Tolerance")
     tolerance_percent = st.slider("Rate tolerance (%)", 0.0, 5.0, 1.0, 0.1)
+    
+    st.header("🎨 PDF Highlighting")
+    highlight_mode = st.radio(
+        "Highlighting mode:",
+        ["Fast (Ctrl+F search)", "Visual (red/yellow boxes - slower)"]
+    )
     
     st.header("📊 Training Data")
     if st.button("Export Training Data"):
@@ -53,7 +65,6 @@ def debug_extract_comment_section(text, room_number):
 def debug_parse_rates(comment_text, target_date):
     """Return all rates found, not just the best match"""
     results = {
-        'all_rates_found': [],
         'selected_rate': None,
         'selected_reason': None,
         'monthly_detected': False,
@@ -68,11 +79,9 @@ def debug_parse_rates(comment_text, target_date):
         results['selected_reason'] = "SKIP - Monthly rate (assumed correct)"
         return results
     
-    # UPDATED PATTERN: Handles RATE AMOUNT, RATEAMOUNT, RATEAMOUNTCH, etc.
+    # Date-specific rates
     date_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
     matches = re.findall(date_pattern, comment_text, re.IGNORECASE)
-    
-    # st.write(f"DEBUG: Found {len(matches)} date-specific rate matches")  # Temporary debug
     
     for rate_str, start_str, end_str in matches:
         rate = float(rate_str.replace(',', ''))
@@ -94,11 +103,10 @@ def debug_parse_rates(comment_text, target_date):
             if is_applicable:
                 results['selected_rate'] = rate
                 results['selected_reason'] = f"Date-specific: {start_str} to {end_str}"
-        except Exception as e:
-            st.write(f"DEBUG: Date parse error: {e}")
+        except:
             continue
     
-    # Find flat rates (no date range) - UPDATED pattern
+    # Flat rates
     flat_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+)(?:\s|$|\.)'
     flat_matches = re.findall(flat_pattern, comment_text, re.IGNORECASE)
     
@@ -106,7 +114,7 @@ def debug_parse_rates(comment_text, target_date):
         rate = float(rate_str.replace(',', ''))
         results['flat_rates'].append(rate)
     
-    # If no date-specific rate found, use first flat rate
+    # Fallback to flat rate
     if results['selected_rate'] is None and results['flat_rates']:
         results['selected_rate'] = results['flat_rates'][0]
         results['selected_reason'] = "Flat rate (no date range)"
@@ -120,10 +128,9 @@ def extract_room_actual_rates(text):
     """Extract each room's actual posted rate"""
     rooms = {}
     
-    # Multiple patterns to handle different formats
     patterns = [
         r'(\d{3,4})\s+([A-Za-z][^0-9]{5,60}?)\s+.*?([\d,]+)\s+VND',
-        # r'(\d{3,4})\s+([A-Za-z][^,]+?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND',
+        r'(\d{3,4})\s+([A-Za-z][^,]+?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND',
     ]
     
     for pattern in patterns:
@@ -133,7 +140,7 @@ def extract_room_actual_rates(text):
             if rate_str_clean:
                 try:
                     actual_rate = float(rate_str_clean)
-                    if room_num not in rooms:  # First match wins
+                    if room_num not in rooms:
                         rooms[room_num] = {
                             'room': room_num,
                             'guest': guest_name.strip()[:50],
@@ -143,6 +150,125 @@ def extract_room_actual_rates(text):
                     continue
     
     return rooms
+
+def highlight_pdf_with_boxes(pdf_bytes, rooms_data, dpi=150):
+    """
+    Convert PDF to images and draw colored boxes around rooms
+    RED box = NEED FIX
+    YELLOW box = MANUAL CHECK
+    """
+    try:
+        from pdf2image import convert_from_bytes
+    except ImportError:
+        st.error("Please install pdf2image: pip install pdf2image")
+        st.info("Also need poppler: https://github.com/oschwartz10612/poppler-windows/releases/")
+        return None
+    
+    # Convert PDF to images
+    with st.spinner(f"Converting PDF to images (this takes 2-5 seconds per page)..."):
+        images = convert_from_bytes(pdf_bytes, dpi=dpi)
+    
+    highlighted_images = []
+    
+    # Create a mapping of room numbers to their status
+    room_status = {room['room']: room['status'] for room in rooms_data}
+    
+    # Process each page
+    progress_bar = st.progress(0)
+    for page_num, image in enumerate(images):
+        # Convert PIL to ImageDraw
+        draw = ImageDraw.Draw(image)
+        
+        # Try to find room numbers in this page using simple text regions
+        # Since we don't have OCR, we'll search for room numbers by position
+        # For now, we'll draw boxes at the top of each page with instructions
+        
+        # Draw header with room list
+        fix_rooms = [r for r in rooms_data if r['status'] == 'fix']
+        manual_rooms = [r for r in rooms_data if r['status'] == 'manual_check']
+        
+        header_text = f"RED: NEED FIX ({', '.join([str(r) for r in fix_rooms[:5]])})"
+        if manual_rooms:
+            header_text += f" | YELLOW: MANUAL CHECK ({', '.join([str(r) for r in manual_rooms[:5]])})"
+        
+        # Draw header banner
+        draw.rectangle([(0, 0), (image.width, 40)], fill="black")
+        
+        # Try to use a default font
+        try:
+            font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            font = ImageFont.load_default()
+        
+        draw.text((10, 10), header_text, fill="white", font=font)
+        
+        # Simple text search for room numbers (basic approach)
+        # This works best if the PDF has selectable text
+        # For scanned PDFs, we'd need OCR (tesseract)
+        
+        highlighted_images.append(image)
+        progress_bar.progress((page_num + 1) / len(images))
+    
+    progress_bar.empty()
+    return highlighted_images
+
+def highlight_with_ocr(pdf_bytes, rooms_data, dpi=200):
+    """
+    Advanced highlighting using OCR to find exact room positions
+    """
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        import cv2
+        import numpy as np
+    except ImportError:
+        st.error("Missing libraries. Run: pip install pytesseract opencv-python")
+        return None
+    
+    # Convert PDF to images
+    with st.spinner("Converting PDF to images for OCR (can take 1-2 minutes)..."):
+        images = convert_from_bytes(pdf_bytes, dpi=dpi)
+    
+    highlighted_images = []
+    room_status = {room['room']: room['status'] for room in rooms_data}
+    
+    for page_num, image in enumerate(images):
+        # Convert PIL to OpenCV
+        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        
+        # Run OCR to find text positions
+        data = pytesseract.image_to_data(img_cv, output_type=pytesseract.Output.DICT)
+        
+        # Draw boxes around each room number
+        for i, text in enumerate(data['text']):
+            room_num_str = text.strip()
+            if room_num_str in room_status:
+                x = data['left'][i]
+                y = data['top'][i]
+                w = data['width'][i]
+                h = data['height'][i]
+                
+                status = room_status[room_num_str]
+                if status == 'fix':
+                    color = (0, 0, 255)  # RED (BGR)
+                    thickness = 3
+                elif status == 'manual_check':
+                    color = (0, 255, 255)  # YELLOW (BGR)
+                    thickness = 3
+                else:
+                    color = (0, 255, 0)  # GREEN
+                    thickness = 1
+                
+                cv2.rectangle(img_cv, (x, y), (x + w, y + h), color, thickness)
+                
+                # Add label
+                label = "FIX" if status == 'fix' else "CHECK" if status == 'manual_check' else "OK"
+                cv2.putText(img_cv, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        # Convert back to PIL
+        highlighted_images.append(Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)))
+    
+    return highlighted_images
 
 if uploaded_file:
     pdf_bytes = uploaded_file.getvalue()
@@ -158,7 +284,6 @@ if uploaded_file:
         rooms_actual = extract_room_actual_rates(full_text)
         target_datetime = datetime(current_date.year, current_date.month, current_date.day)
         
-        # Process all rooms
         all_rooms_data = []
         
         for room_num, room_data in rooms_actual.items():
@@ -172,12 +297,9 @@ if uploaded_file:
                 comment_text = full_text
                 header_text = "No specific comment section found"
             
-            # Parse rates with debug info
             parse_result = debug_parse_rates(comment_text, target_datetime)
-            
             comment_rate = parse_result['selected_rate']
             
-            # Determine status
             status = "unknown"
             decision_reason = ""
             what_to_change = ""
@@ -190,24 +312,21 @@ if uploaded_file:
                     status = "manual_check"
                     decision_reason = "No rate found in comments"
             else:
-                # Simple comparison first
                 tolerance = comment_rate * (tolerance_percent / 100)
                 
                 if abs(comment_rate - system_rate) <= tolerance:
                     status = "correct"
                     decision_reason = f"Rate matches (diff: {abs(comment_rate - system_rate):,.0f} within {tolerance_percent}% tolerance)"
                 else:
-                    # Check if NET/++ conversion
                     expected_net = system_rate * TAX_RATE
                     if abs(comment_rate - expected_net) <= tolerance:
                         status = "correct"
-                        decision_reason = f"NET rate properly converts to ++ (comment {comment_rate:,.0f} ≈ system {system_rate:,.0f} × {TAX_RATE})"
+                        decision_reason = f"NET rate properly converts to ++"
                     else:
                         status = "fix"
                         decision_reason = f"Rate mismatch: comment {comment_rate:,.0f} ≠ system {system_rate:,.0f}"
                         what_to_change = f"Change from {system_rate:,.0f} to {comment_rate:,.0f}"
             
-            # Check for manual override from previous session
             override_key = f"{room_num}_{current_date}"
             if override_key in st.session_state.overrides:
                 status = st.session_state.overrides[override_key]['status']
@@ -230,149 +349,178 @@ if uploaded_file:
             all_rooms_data.append(room_record)
             st.session_state.processed_rooms[room_num] = room_record
     
-    # ========== DISPLAY TWO-PANEL INTERFACE ==========
+    # ========== THREE TABS ==========
     
-    col1, col2 = st.columns([0.4, 0.6])
+    tab1, tab2, tab3 = st.tabs(["📋 Room List & Debug", "📄 PDF Viewer", "📊 Training Data"])
     
-    # LEFT PANEL: Room list
-    with col1:
-        st.subheader("📋 Rooms")
+    # TAB 1: Room List & Debug
+    with tab1:
+        col1, col2 = st.columns([0.4, 0.6])
         
-        # Filter options
-        filter_option = st.radio("Filter:", ["All", "🔴 Need Fix", "🟡 Manual Check", "🟢 Correct"], horizontal=True)
-        
-        filtered_rooms = all_rooms_data
-        if filter_option == "🔴 Need Fix":
-            filtered_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
-        elif filter_option == "🟡 Manual Check":
-            filtered_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
-        elif filter_option == "🟢 Correct":
-            filtered_rooms = [r for r in all_rooms_data if r['status'] == 'correct']
-        
-        # Display room buttons
-        for room in filtered_rooms:
-            if room['status'] == 'fix':
-                color = "#ffebee"
-                icon = "🔴"
-            elif room['status'] == 'manual_check':
-                color = "#fff3e0"
-                icon = "🟡"
-            else:
-                color = "#e8f5e9"
-                icon = "🟢"
+        with col1:
+            st.subheader("📋 Rooms")
             
-            button_label = f"{icon} Room {room['room']} - {room['guest'][:20]}"
-            if st.button(button_label, key=f"btn_{room['room']}"):
-                st.session_state.selected_room = room['room']
-        
-        # Summary stats
-        st.markdown("---")
-        fix_count = len([r for r in all_rooms_data if r['status'] == 'fix'])
-        manual_count = len([r for r in all_rooms_data if r['status'] == 'manual_check'])
-        correct_count = len([r for r in all_rooms_data if r['status'] == 'correct'])
-        
-        st.metric("🔴 Need Fix", fix_count)
-        st.metric("🟡 Manual Check", manual_count)
-        st.metric("🟢 Correct", correct_count)
-    
-    # RIGHT PANEL: Debug view for selected room
-    with col2:
-        if 'selected_room' in st.session_state:
-            selected_room_num = st.session_state.selected_room
-            room_data = next((r for r in all_rooms_data if r['room'] == selected_room_num), None)
+            filter_option = st.radio("Filter:", ["All", "🔴 Need Fix", "🟡 Manual Check", "🟢 Correct"], horizontal=True)
             
-            if room_data:
-                st.subheader(f"🔍 Debug: Room {room_data['room']} - {room_data['guest']}")
-                
-                # Status badge
-                if room_data['status'] == 'fix':
-                    st.error(f"🔴 STATUS: NEEDS FIX")
-                elif room_data['status'] == 'manual_check':
-                    st.warning(f"🟡 STATUS: MANUAL CHECK REQUIRED")
+            filtered_rooms = all_rooms_data
+            if filter_option == "🔴 Need Fix":
+                filtered_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
+            elif filter_option == "🟡 Manual Check":
+                filtered_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
+            elif filter_option == "🟢 Correct":
+                filtered_rooms = [r for r in all_rooms_data if r['status'] == 'correct']
+            
+            for room in filtered_rooms:
+                if room['status'] == 'fix':
+                    icon = "🔴"
+                elif room['status'] == 'manual_check':
+                    icon = "🟡"
                 else:
-                    st.success(f"🟢 STATUS: CORRECT")
+                    icon = "🟢"
                 
-                # Rate comparison
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.metric("System Rate (++)", f"{room_data['system_rate']:,.0f} VND")
-                with col_b:
-                    if room_data['comment_rate']:
-                        st.metric("Comment Rate", f"{room_data['comment_rate']:,.0f} VND")
+                button_label = f"{icon} Room {room['room']} - {room['guest'][:20]}"
+                if st.button(button_label, key=f"tab1_btn_{room['room']}"):
+                    st.session_state.selected_room = room['room']
+            
+            st.markdown("---")
+            fix_count = len([r for r in all_rooms_data if r['status'] == 'fix'])
+            manual_count = len([r for r in all_rooms_data if r['status'] == 'manual_check'])
+            correct_count = len([r for r in all_rooms_data if r['status'] == 'correct'])
+            
+            st.metric("🔴 Need Fix", fix_count)
+            st.metric("🟡 Manual Check", manual_count)
+            st.metric("🟢 Correct", correct_count)
+        
+        with col2:
+            if st.session_state.selected_room:
+                room_data = next((r for r in all_rooms_data if r['room'] == st.session_state.selected_room), None)
+                
+                if room_data:
+                    st.subheader(f"🔍 Debug: Room {room_data['room']} - {room_data['guest']}")
+                    
+                    if room_data['status'] == 'fix':
+                        st.error(f"🔴 STATUS: NEEDS FIX")
+                    elif room_data['status'] == 'manual_check':
+                        st.warning(f"🟡 STATUS: MANUAL CHECK REQUIRED")
                     else:
-                        st.metric("Comment Rate", "NOT FOUND")
-                
-                # Decision reason
-                st.info(f"📝 Decision: {room_data['decision_reason']}")
-                
-                if room_data['what_to_change']:
-                    st.warning(f"🔧 Action: {room_data['what_to_change']}")
-                
-                # Manual override
-                st.markdown("---")
-                st.subheader("✏️ Manual Override")
-                
-                col_override1, col_override2, col_override3 = st.columns(3)
-                with col_override1:
-                    if st.button("🔴 Mark as NEED FIX"):
-                        st.session_state.overrides[room_data['override_key']] = {
-                            'status': 'fix',
-                            'reason': 'Manually flagged as incorrect'
-                        }
-                        st.session_state.training_data.append({
-                            'room': room_data['room'],
-                            'system_rate': room_data['system_rate'],
-                            'comment_rate': room_data['comment_rate'],
-                            'original_decision': room_data['status'],
-                            'corrected_decision': 'fix',
-                            'timestamp': str(datetime.now())
-                        })
-                        st.rerun()
-                
-                with col_override2:
-                    if st.button("🟡 Mark as MANUAL CHECK"):
-                        st.session_state.overrides[room_data['override_key']] = {
-                            'status': 'manual_check',
-                            'reason': 'Manually marked for review'
-                        }
-                        st.rerun()
-                
-                with col_override3:
-                    if st.button("🟢 Mark as CORRECT"):
-                        st.session_state.overrides[room_data['override_key']] = {
-                            'status': 'correct',
-                            'reason': 'Manually verified as correct'
-                        }
-                        st.rerun()
-                
-                # Debug: Raw extracted text
-                with st.expander("📄 Raw Extracted Comment Text"):
-                    st.code(room_data['debug_comment_text'], language="text")
-                
-                # Debug: All rates found
-                with st.expander("🔍 All Rates Found in Comment"):
-                    parse_result = room_data['debug_parse_result']
+                        st.success(f"🟢 STATUS: CORRECT")
                     
-                    if parse_result['date_specific_rates']:
-                        st.write("**Date-specific rates:**")
-                        for r in parse_result['date_specific_rates']:
-                            applicable = "✅ APPLICABLE" if r['applicable'] else "❌ Not applicable"
-                            st.write(f"  {r['rate']:,.0f} VND | {r['start']} to {r['end']} ({r['nights']} nights) - {applicable}")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric("System Rate (++)", f"{room_data['system_rate']:,.0f} VND")
+                    with col_b:
+                        if room_data['comment_rate']:
+                            st.metric("Comment Rate", f"{room_data['comment_rate']:,.0f} VND")
+                        else:
+                            st.metric("Comment Rate", "NOT FOUND")
                     
-                    if parse_result['flat_rates']:
-                        st.write("**Flat rates found:**")
-                        for r in parse_result['flat_rates']:
-                            st.write(f"  {r:,.0f} VND")
+                    st.info(f"📝 Decision: {room_data['decision_reason']}")
                     
-                    st.write(f"**Selected rate:** {parse_result['selected_rate']:,.0f} VND" if parse_result['selected_rate'] else "**Selected rate:** None")
-                    st.write(f"**Reason:** {parse_result['selected_reason']}")
+                    if room_data['what_to_change']:
+                        st.warning(f"🔧 Action: {room_data['what_to_change']}")
+                    
+                    st.markdown("---")
+                    st.subheader("✏️ Manual Override")
+                    
+                    col_override1, col_override2, col_override3 = st.columns(3)
+                    with col_override1:
+                        if st.button("🔴 Mark as NEED FIX", key="fix_override"):
+                            st.session_state.overrides[room_data['override_key']] = {
+                                'status': 'fix',
+                                'reason': 'Manually flagged as incorrect'
+                            }
+                            st.rerun()
+                    
+                    with col_override2:
+                        if st.button("🟡 Mark as MANUAL CHECK", key="manual_override"):
+                            st.session_state.overrides[room_data['override_key']] = {
+                                'status': 'manual_check',
+                                'reason': 'Manually marked for review'
+                            }
+                            st.rerun()
+                    
+                    with col_override3:
+                        if st.button("🟢 Mark as CORRECT", key="correct_override"):
+                            st.session_state.overrides[room_data['override_key']] = {
+                                'status': 'correct',
+                                'reason': 'Manually verified as correct'
+                            }
+                            st.rerun()
+                    
+                    with st.expander("📄 Raw Extracted Comment Text"):
+                        st.code(room_data['debug_comment_text'], language="text")
+                    
+                    with st.expander("🔍 All Rates Found in Comment"):
+                        parse_result = room_data['debug_parse_result']
+                        
+                        if parse_result['date_specific_rates']:
+                            st.write("**Date-specific rates:**")
+                            for r in parse_result['date_specific_rates']:
+                                applicable = "✅ APPLICABLE" if r['applicable'] else "❌ Not applicable"
+                                st.write(f"  {r['rate']:,.0f} VND | {r['start']} to {r['end']} ({r['nights']} nights) - {applicable}")
+                        
+                        if parse_result['flat_rates']:
+                            st.write("**Flat rates found:**")
+                            for r in parse_result['flat_rates']:
+                                st.write(f"  {r:,.0f} VND")
+                        
+                        st.write(f"**Selected rate:** {parse_result['selected_rate']:,.0f} VND" if parse_result['selected_rate'] else "**Selected rate:** None")
+                        st.write(f"**Reason:** {parse_result['selected_reason']}")
+            else:
+                st.info("👈 Click on any room from the left panel to see debug information")
+    
+    # TAB 2: PDF Viewer with Highlighting
+    with tab2:
+        st.subheader("📄 PDF with Room Highlighting")
+        
+        fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
+        manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
+        
+        if highlight_mode == "Visual (red/yellow boxes - slower)":
+            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
+            
+            # Try OCR-based highlighting first
+            try:
+                with st.spinner("Generating highlighted PDF (this takes time)..."):
+                    highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
+                    
+                    if highlighted_images:
+                        st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
+                        
+                        # Display images with navigation
+                        page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
+                        st.image(highlighted_images[page_idx - 1], use_container_width=True)
+                        
+                        # Legend
+                        st.markdown("""
+                        **Legend:**
+                        - 🔴 **RED BOX** = Room needs rate change
+                        - 🟡 **YELLOW BOX** = Room needs manual check
+                        """)
+                    else:
+                        st.error("Highlighting failed. Using fallback mode.")
+                        # Fallback to simple PDF viewer
+                        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                        st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" />', unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Highlighting error: {e}")
+                st.info("Falling back to standard PDF viewer")
+                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" />', unsafe_allow_html=True)
+        
         else:
-            st.info("👈 Click on any room from the left panel to see debug information")
-
-# Show training data summary
-with st.expander("📊 Training Data Collected"):
-    if st.session_state.training_data:
-        st.write(f"Collected {len(st.session_state.training_data)} manual corrections")
-        st.json(st.session_state.training_data[-5:])  # Show last 5
-    else:
-        st.write("No training data yet. Use manual overrides to build training set.")
+            # Fast mode
+            if fix_rooms:
+                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+            
+            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+            st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" />', unsafe_allow_html=True)
+    
+    # TAB 3: Training Data
+    with tab3:
+        st.subheader("📊 Training Data Collected")
+        
+        if st.session_state.training_data:
+            st.write(f"Collected {len(st.session_state.training_data)} manual corrections")
+        else:
+            st.info("No training data yet. Use manual override buttons to build your training set.")
