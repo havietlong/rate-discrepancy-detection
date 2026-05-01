@@ -7,36 +7,6 @@ import json
 from io import BytesIO
 import base64
 import os
-import sys
-import tempfile
-from PIL import Image, ImageDraw, ImageFont
-import numpy as np
-
-# Fix poppler path for Codespaces
-poppler_paths = [
-    "/usr/bin",
-    "/usr/local/bin",
-    "/bin",
-]
-
-for path in poppler_paths:
-    poppler_test = os.path.join(path, "pdfinfo")
-    if os.path.exists(poppler_test):
-        os.environ["PATH"] = path + ":" + os.environ.get("PATH", "")
-        print(f"✅ Found poppler at: {path}")
-        break
-
-# Fix tesseract path
-tesseract_paths = [
-    "/usr/bin/tesseract",
-    "/usr/local/bin/tesseract",
-]
-
-for path in tesseract_paths:
-    if os.path.exists(path):
-        os.environ["TESSERACT_CMD"] = path
-        print(f"✅ Found tesseract at: {path}")
-        break
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
 st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
@@ -53,6 +23,8 @@ if 'training_data' not in st.session_state:
 if 'selected_room' not in st.session_state:
     st.session_state.selected_room = None
 
+# ========== FUNCTIONS ==========
+
 def check_dependencies():
     """Check if all required dependencies are available"""
     import subprocess
@@ -65,14 +37,14 @@ def check_dependencies():
         result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
         results['poppler'] = "✅ Available"
     except FileNotFoundError:
-        results['poppler'] = "❌ Not found - run: sudo apt install poppler-utils"
+        results['poppler'] = "❌ Not found"
     
     # Check tesseract
     try:
         result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
         results['tesseract'] = "✅ Available"
     except FileNotFoundError:
-        results['tesseract'] = "❌ Not found - run: sudo apt install tesseract-ocr"
+        results['tesseract'] = "❌ Not found"
     
     # Check Python packages
     packages = ['pdf2image', 'pytesseract', 'cv2', 'PIL']
@@ -81,41 +53,9 @@ def check_dependencies():
             importlib.import_module(pkg)
             results[pkg] = "✅ Available"
         except ImportError:
-            results[pkg] = "❌ Missing - pip install"
+            results[pkg] = "❌ Missing"
     
     return results
-
-# Sidebar
-with st.sidebar:
-    st.header("📅 Settings")
-    current_date = st.date_input("Today's date", datetime.now())
-    
-    st.header("⚙️ Tolerance")
-    tolerance_percent = st.slider("Rate tolerance (%)", 0.0, 5.0, 1.0, 0.1)
-    
-    st.header("🎨 PDF Highlighting")
-    highlight_mode = st.radio(
-        "Highlighting mode:",
-        ["Fast (Ctrl+F search)", "Visual (red/yellow boxes - slower)"]
-    )
-    
-    st.header("📊 Training Data")
-    if st.button("Export Training Data"):
-        if st.session_state.training_data:
-            json_str = json.dumps(st.session_state.training_data, indent=2)
-            st.download_button("Download JSON", json_str, "training_data.json")
-    
-    st.header("📁 Upload")
-    uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")
-
-    st.header("🔧 Diagnostics")
-    if st.button("Check Dependencies"):
-        deps = check_dependencies()
-        for name, status in deps.items():
-            if "✅" in status:
-                st.success(f"{name}: {status}")
-            else:
-                st.error(f"{name}: {status}")
 
 def debug_extract_comment_section(text, room_number):
     """Extract and return the exact comment section with boundaries"""
@@ -219,98 +159,29 @@ def extract_room_actual_rates(text):
     
     return rooms
 
-def highlight_pdf_with_boxes(pdf_bytes, rooms_data, dpi=150):
-    """
-    Convert PDF to images and draw colored boxes around rooms
-    RED box = NEED FIX
-    YELLOW box = MANUAL CHECK
-    """
-    try:
-        from pdf2image import convert_from_bytes
-    except ImportError:
-        st.error("Please install pdf2image: pip install pdf2image")
-        st.info("Also need poppler: https://github.com/oschwartz10612/poppler-windows/releases/")
-        return None
-    
-    # Convert PDF to images
-    with st.spinner(f"Converting PDF to images (this takes 2-5 seconds per page)..."):
-        images = convert_from_bytes(pdf_bytes, dpi=dpi)
-    
-    highlighted_images = []
-    
-    # Create a mapping of room numbers to their status
-    room_status = {room['room']: room['status'] for room in rooms_data}
-    
-    # Process each page
-    progress_bar = st.progress(0)
-    for page_num, image in enumerate(images):
-        # Convert PIL to ImageDraw
-        draw = ImageDraw.Draw(image)
-        
-        # Try to find room numbers in this page using simple text regions
-        # Since we don't have OCR, we'll search for room numbers by position
-        # For now, we'll draw boxes at the top of each page with instructions
-        
-        # Draw header with room list
-        fix_rooms = [r for r in rooms_data if r['status'] == 'fix']
-        manual_rooms = [r for r in rooms_data if r['status'] == 'manual_check']
-        
-        header_text = f"RED: NEED FIX ({', '.join([str(r) for r in fix_rooms[:5]])})"
-        if manual_rooms:
-            header_text += f" | YELLOW: MANUAL CHECK ({', '.join([str(r) for r in manual_rooms[:5]])})"
-        
-        # Draw header banner
-        draw.rectangle([(0, 0), (image.width, 40)], fill="black")
-        
-        # Try to use a default font
-        try:
-            font = ImageFont.truetype("arial.ttf", 16)
-        except:
-            font = ImageFont.load_default()
-        
-        draw.text((10, 10), header_text, fill="white", font=font)
-        
-        # Simple text search for room numbers (basic approach)
-        # This works best if the PDF has selectable text
-        # For scanned PDFs, we'd need OCR (tesseract)
-        
-        highlighted_images.append(image)
-        progress_bar.progress((page_num + 1) / len(images))
-    
-    progress_bar.empty()
-    return highlighted_images
-
 def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
-    """
-    Advanced highlighting using OCR to find exact room positions
-    """
+    """Advanced highlighting using OCR to find exact room positions"""
     try:
         from pdf2image import convert_from_bytes
         import pytesseract
         import cv2
         import numpy as np
-    except ImportError as e:
-        st.error(f"Missing library: {e}")
-        st.info("Run: pip install pytesseract opencv-python-headless pdf2image")
+    except ImportError:
         return None
     
-    # Try to find poppler manually
-    import subprocess
-    try:
-        # Test if poppler is accessible
-        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
-        st.write("✅ Poppler found")
-    except FileNotFoundError:
-        st.error("Poppler not found. Please run: sudo apt install poppler-utils")
-        return None
+    # Explicit poppler path
+    poppler_path = "/usr/bin"
     
     # Convert PDF to images
-    with st.spinner("Converting PDF to images for OCR (can take 1-2 minutes)..."):
+    with st.spinner("Converting PDF to images for OCR..."):
         try:
-            images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt='jpeg')
-            st.write(f"✅ Converted {len(images)} pages")
-        except Exception as e:
-            st.error(f"PDF conversion failed: {e}")
+            images = convert_from_bytes(
+                pdf_bytes, 
+                dpi=dpi, 
+                fmt='jpeg',
+                poppler_path=poppler_path
+            )
+        except Exception:
             return None
     
     highlighted_images = []
@@ -320,11 +191,9 @@ def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
     room_status_variants = {}
     for room_num, status in room_status.items():
         room_status_variants[room_num] = status
-        room_status_variants[room_num.lstrip('0')] = status  # "403" vs "0403"
+        room_status_variants[room_num.lstrip('0')] = status
     
     for page_num, image in enumerate(images):
-        st.write(f"Processing page {page_num + 1} of {len(images)}...")
-        
         # Convert PIL to OpenCV
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         
@@ -337,7 +206,6 @@ def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
         for i, text in enumerate(data['text']):
             text_clean = text.strip()
             
-            # Check exact match or variant
             status = None
             if text_clean in room_status:
                 status = room_status[text_clean]
@@ -351,44 +219,66 @@ def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
                 h = data['height'][i]
                 
                 if status == 'fix':
-                    color = (0, 0, 255)  # RED (BGR)
+                    color = (0, 0, 255)
                     thickness = 4
                     label = "FIX"
                 elif status == 'manual_check':
-                    color = (0, 255, 255)  # YELLOW (BGR)
+                    color = (0, 255, 255)
                     thickness = 4
                     label = "CHECK"
                 else:
-                    color = (0, 255, 0)  # GREEN
+                    color = (0, 255, 0)
                     thickness = 2
                     label = "OK"
                 
-                # Draw rectangle
                 cv2.rectangle(img_cv, (x, y), (x + w, y + h), color, thickness)
                 
-                # Draw label background
-                label_bg_color = (0, 0, 0)  # Black background
+                # Draw label
+                label_bg_color = (0, 0, 0)
                 label_font_scale = 0.6
                 label_thickness = 2
                 (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_thickness)
                 cv2.rectangle(img_cv, (x, y - label_h - 4), (x + label_w + 4, y), label_bg_color, -1)
-                
-                # Draw label text
                 cv2.putText(img_cv, label, (x + 2, y - 4), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, color, label_thickness)
                 
                 boxes_drawn += 1
         
-        # Add page number and stats
+        # Add page number
         cv2.putText(img_cv, f"Page {page_num + 1} | Boxes: {boxes_drawn}", (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Convert back to PIL
         highlighted_images.append(Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)))
     
-    st.success(f"✅ Highlighted {len(highlighted_images)} pages with {sum(1 for r in rooms_data if r['status'] in ['fix', 'manual_check'])} rooms marked")
     return highlighted_images
 
+# ========== SIDEBAR ==========
 
+with st.sidebar:
+    st.header("📅 Settings")
+    current_date = st.date_input("Today's date", datetime.now())
+    
+    st.header("⚙️ Tolerance")
+    tolerance_percent = st.slider("Rate tolerance (%)", 0.0, 5.0, 1.0, 0.1)
+    
+    st.header("🎨 PDF Highlighting")
+    highlight_mode = st.radio(
+        "Highlighting mode:",
+        ["Fast (Ctrl+F search)", "Visual (red/yellow boxes - slower)"]
+    )
+    
+    st.header("📁 Upload")
+    uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")
+    
+    st.header("🔧 Diagnostics")
+    if st.button("Check Dependencies"):
+        deps = check_dependencies()
+        for name, status in deps.items():
+            if "✅" in status:
+                st.success(f"{name}: {status}")
+            else:
+                st.error(f"{name}: {status}")
+
+# ========== MAIN APP ==========
 
 if uploaded_file:
     pdf_bytes = uploaded_file.getvalue()
@@ -436,7 +326,7 @@ if uploaded_file:
                 
                 if abs(comment_rate - system_rate) <= tolerance:
                     status = "correct"
-                    decision_reason = f"Rate matches (diff: {abs(comment_rate - system_rate):,.0f} within {tolerance_percent}% tolerance)"
+                    decision_reason = f"Rate matches (diff: {abs(comment_rate - system_rate):,.0f})"
                 else:
                     expected_net = system_rate * TAX_RATE
                     if abs(comment_rate - expected_net) <= tolerance:
@@ -461,7 +351,6 @@ if uploaded_file:
                 'decision_reason': decision_reason,
                 'what_to_change': what_to_change,
                 'debug_comment_text': comment_text[:2000],
-                'debug_header': header_text[:500],
                 'debug_parse_result': parse_result,
                 'override_key': override_key
             }
@@ -499,7 +388,7 @@ if uploaded_file:
                     icon = "🟢"
                 
                 button_label = f"{icon} Room {room['room']} - {room['guest'][:20]}"
-                if st.button(button_label, key=f"tab1_btn_{room['room']}"):
+                if st.button(button_label, key=f"btn_{room['room']}"):
                     st.session_state.selected_room = room['room']
             
             st.markdown("---")
@@ -519,11 +408,11 @@ if uploaded_file:
                     st.subheader(f"🔍 Debug: Room {room_data['room']} - {room_data['guest']}")
                     
                     if room_data['status'] == 'fix':
-                        st.error(f"🔴 STATUS: NEEDS FIX")
+                        st.error("🔴 STATUS: NEEDS FIX")
                     elif room_data['status'] == 'manual_check':
-                        st.warning(f"🟡 STATUS: MANUAL CHECK REQUIRED")
+                        st.warning("🟡 STATUS: MANUAL CHECK REQUIRED")
                     else:
-                        st.success(f"🟢 STATUS: CORRECT")
+                        st.success("🟢 STATUS: CORRECT")
                     
                     col_a, col_b = st.columns(2)
                     with col_a:
@@ -544,7 +433,7 @@ if uploaded_file:
                     
                     col_override1, col_override2, col_override3 = st.columns(3)
                     with col_override1:
-                        if st.button("🔴 Mark as NEED FIX", key="fix_override"):
+                        if st.button("🔴 Mark as NEED FIX"):
                             st.session_state.overrides[room_data['override_key']] = {
                                 'status': 'fix',
                                 'reason': 'Manually flagged as incorrect'
@@ -552,7 +441,7 @@ if uploaded_file:
                             st.rerun()
                     
                     with col_override2:
-                        if st.button("🟡 Mark as MANUAL CHECK", key="manual_override"):
+                        if st.button("🟡 Mark as MANUAL CHECK"):
                             st.session_state.overrides[room_data['override_key']] = {
                                 'status': 'manual_check',
                                 'reason': 'Manually marked for review'
@@ -560,7 +449,7 @@ if uploaded_file:
                             st.rerun()
                     
                     with col_override3:
-                        if st.button("🟢 Mark as CORRECT", key="correct_override"):
+                        if st.button("🟢 Mark as CORRECT"):
                             st.session_state.overrides[room_data['override_key']] = {
                                 'status': 'correct',
                                 'reason': 'Manually verified as correct'
@@ -590,24 +479,20 @@ if uploaded_file:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
     # TAB 2: PDF Viewer with Highlighting
-    # TAB 2: PDF Viewer with Highlighting
-with tab2:
-    st.subheader("📄 PDF with Room Highlighting")
-    
-    fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
-    manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
-    
-    if highlight_mode == "Visual (red/yellow boxes - slower)":
-        st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
+    with tab2:
+        st.subheader("📄 PDF with Room Highlighting")
         
-        try:
-            with st.spinner("Generating highlighted PDF (this takes time)..."):
+        fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
+        
+        if highlight_mode == "Visual (red/yellow boxes - slower)":
+            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
+            
+            try:
+                # Try OCR-based highlighting
                 highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
                 
                 if highlighted_images:
                     st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
-                    
-                    # Display images with navigation
                     page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
                     st.image(highlighted_images[page_idx - 1], use_container_width=True)
                     
@@ -618,23 +503,20 @@ with tab2:
                     """)
                 else:
                     st.error("Highlighting failed. Using fallback mode.")
-                    # Fallback to safe PDF viewer
                     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
                     st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Highlighting error: {e}")
-            st.info("Falling back to standard PDF viewer")
-            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
-    
-    else:
-        # Fast mode - use iframe instead of embed
-        if fix_rooms:
-            st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+            except Exception as e:
+                st.error(f"Highlighting error")
+                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
         
-        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-        # Use iframe instead of embed to avoid sandbox issues
-        st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
+        else:
+            # Fast mode
+            if fix_rooms:
+                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+            
+            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+            st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
     
     # TAB 3: Training Data
     with tab3:
