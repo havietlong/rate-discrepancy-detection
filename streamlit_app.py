@@ -478,24 +478,90 @@ if uploaded_file:
             else:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
-    # TAB 2: PDF Viewer with Highlighting
+        # TAB 2: PDF Viewer with Highlighting
     with tab2:
-        st.subheader("📄 PDF Viewer")
-    
-        # Write PDF to a temporary file and display with st.echo
-        import tempfile
+        st.subheader("📄 PDF with Room Highlighting")
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmpfile:
-            tmpfile.write(pdf_bytes)
-            tmpfile_path = tmpfile.name
+        fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
         
-        # Use Streamlit's built-in PDF viewer
-        with open(tmpfile_path, 'rb') as f:
-            st.download_button("📥 Download PDF", f, file_name="report.pdf")
+        # Define base64_pdf ONCE at the start of the tab
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
         
-        # Try simple embed
-        st.markdown(f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" type="application/pdf">', unsafe_allow_html=True)
-        # TAB 3: Training Data
+        if highlight_mode == "Visual (red/yellow boxes - slower)":
+            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
+            
+            # Add download button as fallback
+            st.download_button(
+                label="📥 Download PDF (if viewer doesn't work)",
+                data=pdf_bytes,
+                file_name="night_audit_report.pdf",
+                mime="application/pdf"
+            )
+            
+            st.markdown("---")
+            
+            try:
+                # Try OCR-based highlighting
+                highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
+                
+                if highlighted_images:
+                    st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
+                    page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
+                    st.image(highlighted_images[page_idx - 1], use_container_width=True)
+                    
+                    st.markdown("""
+                    **Legend:**
+                    - 🔴 **RED BOX** = Room needs rate change
+                    - 🟡 **YELLOW BOX** = Room needs manual check
+                    """)
+                else:
+                    st.error("Highlighting failed. Using fallback mode.")
+                    # Use object tag instead of embed/iframe
+                    st.markdown(f'''
+                        <object data="data:application/pdf;base64,{base64_pdf}" 
+                                type="application/pdf" 
+                                width="100%" 
+                                height="700px">
+                            <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
+                        </object>
+                    ''', unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Highlighting error: {str(e)[:100]}")
+                st.info("Using standard PDF viewer")
+                # Use object tag
+                st.markdown(f'''
+                    <object data="data:application/pdf;base64,{base64_pdf}" 
+                            type="application/pdf" 
+                            width="100%" 
+                            height="700px">
+                        <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
+                    </object>
+                ''', unsafe_allow_html=True)
+        
+        else:
+            # Fast mode
+            if fix_rooms:
+                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+            
+            st.download_button(
+                label="📥 Download PDF",
+                data=pdf_bytes,
+                file_name="night_audit_report.pdf",
+                mime="application/pdf"
+            )
+            
+            st.markdown("---")
+            
+            # Use object tag (more reliable than embed or iframe)
+            st.markdown(f'''
+                <object data="data:application/pdf;base64,{base64_pdf}" 
+                        type="application/pdf" 
+                        width="100%" 
+                        height="700px">
+                    <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
+                </object>
+            ''', unsafe_allow_html=True)
+    # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
         
