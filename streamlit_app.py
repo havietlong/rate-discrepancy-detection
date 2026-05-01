@@ -480,45 +480,22 @@ if uploaded_file:
     
     # TAB 2: PDF Viewer with Highlighting
     with tab2:
-        st.subheader("📄 PDF with Room Highlighting")
-        
-        fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
-        
-        if highlight_mode == "Visual (red/yellow boxes - slower)":
-            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
-            
-            try:
-                # Try OCR-based highlighting
-                highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
-                
-                if highlighted_images:
-                    st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
-                    page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
-                    st.image(highlighted_images[page_idx - 1], use_container_width=True)
-                    
-                    st.markdown("""
-                    **Legend:**
-                    - 🔴 **RED BOX** = Room needs rate change
-                    - 🟡 **YELLOW BOX** = Room needs manual check
-                    """)
-                else:
-                    st.error("Highlighting failed. Using fallback mode.")
-                    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                    st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Highlighting error")
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
-        
-        else:
-            # Fast mode
-            if fix_rooms:
-                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
-            
-            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}#toolbar=1&navpanes=1&scrollbar=1" width="100%" height="700px" style="border: none;"></iframe>', unsafe_allow_html=True)
+        st.subheader("📄 PDF Viewer")
     
-    # TAB 3: Training Data
+    # Add download button FIRST
+        st.download_button(
+            label="📥 Click here to download PDF (test if PDF loads)",
+            data=pdf_bytes,
+            file_name="night_audit_report.pdf",
+            mime="application/pdf"
+        )
+        
+        st.markdown("---")
+        
+        # Then try to display it
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700px"></iframe>', unsafe_allow_html=True)
+        # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
         
