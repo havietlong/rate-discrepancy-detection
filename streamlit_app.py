@@ -53,6 +53,38 @@ if 'training_data' not in st.session_state:
 if 'selected_room' not in st.session_state:
     st.session_state.selected_room = None
 
+def check_dependencies():
+    """Check if all required dependencies are available"""
+    import subprocess
+    import importlib
+    
+    results = {}
+    
+    # Check poppler
+    try:
+        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
+        results['poppler'] = "✅ Available"
+    except FileNotFoundError:
+        results['poppler'] = "❌ Not found - run: sudo apt install poppler-utils"
+    
+    # Check tesseract
+    try:
+        result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
+        results['tesseract'] = "✅ Available"
+    except FileNotFoundError:
+        results['tesseract'] = "❌ Not found - run: sudo apt install tesseract-ocr"
+    
+    # Check Python packages
+    packages = ['pdf2image', 'pytesseract', 'cv2', 'PIL']
+    for pkg in packages:
+        try:
+            importlib.import_module(pkg)
+            results[pkg] = "✅ Available"
+        except ImportError:
+            results[pkg] = "❌ Missing - pip install"
+    
+    return results
+
 # Sidebar
 with st.sidebar:
     st.header("📅 Settings")
@@ -356,37 +388,7 @@ def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
     st.success(f"✅ Highlighted {len(highlighted_images)} pages with {sum(1 for r in rooms_data if r['status'] in ['fix', 'manual_check'])} rooms marked")
     return highlighted_images
 
-def check_dependencies():
-    """Check if all required dependencies are available"""
-    import subprocess
-    import importlib
-    
-    results = {}
-    
-    # Check poppler
-    try:
-        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
-        results['poppler'] = "✅ Available"
-    except FileNotFoundError:
-        results['poppler'] = "❌ Not found - run: sudo apt install poppler-utils"
-    
-    # Check tesseract
-    try:
-        result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
-        results['tesseract'] = "✅ Available"
-    except FileNotFoundError:
-        results['tesseract'] = "❌ Not found - run: sudo apt install tesseract-ocr"
-    
-    # Check Python packages
-    packages = ['pdf2image', 'pytesseract', 'cv2', 'PIL']
-    for pkg in packages:
-        try:
-            importlib.import_module(pkg)
-            results[pkg] = "✅ Available"
-        except ImportError:
-            results[pkg] = "❌ Missing - pip install"
-    
-    return results
+
 
 if uploaded_file:
     pdf_bytes = uploaded_file.getvalue()
