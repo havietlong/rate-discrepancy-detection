@@ -1,22 +1,26 @@
 {
   "patterns": {
     "date_specific": [
-      "RATE\\s*AMOUNT\\w*\\s*->([\\d,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})",
-      "SHAREAMOUNT\\w*\\s*->([\\d,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})"
+      "RATE\\s*AMOUNT\\w*\\s*->([\\d.,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})",
+      "SHAREAMOUNT\\w*\\s*->([\\d.,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})"
     ],
     "nett_rates": [
-      "VND?\\s*([\\d.,]+)\\s+NETT",
-      "VND?\\s*([\\d.,]+)\\s+net",
-      "([\\d.,]+)\\s+NETT",
-      "([\\d.,]+)\\s+net",
-      "Total RC.*?([\\d.,]+)\\s+net",
-      "Total\\s+([\\d.,]+)\\s+VND\\s+net"
+      "VND?\\s*([\\d.,]+)\\s*net{1,2}\\s*",
+      "VND?\\s*([\\d.,]+)net{1,2}",
+      "VND?\\s*([\\d.,]+)\\s*net{1,2}(?:\\s|$|\\n)",
+      "([\\d.,]+)\\s*net{1,2}",
+      "([\\d.,]+)\\s*NETT",
+      "Total\\s+RC.*?([\\d.,]+)\\s*net",
+      "Total\\s+([\\d.,]+)\\s*VND\\s*net",
+      "TOTAL\\s+([\\d.,]+)\\s*NETT\\s*/?\\s*MONTH"
     ],
     "pp_rates": [
       "VND?\\s*([\\d.,]+)\\s*\\+\\+",
       "VND?\\s*([\\d.,]+)\\s*\\+\\+\\s*$",
       "([\\d.,]+)\\s*\\+\\+",
-      "VND?\\s*([\\d.,]+)\\s*\\+\\+\\s*(?:rate)?"
+      "VND?\\s*([\\d.,]+)\\s*\\+\\+\\s*(?:rate)?",
+      "VND?\\s*([\\d.,]+)\\s*\\+\\+\\s*KGB",
+      "VND?\\s*([\\d.,]+)\\s*\\+\\+\\s*SGL"
     ],
     "flat_rates": [
       "RATE\\s*AMOUNT\\w*\\s*->([\\d.,]+)(?:\\s|\\.|$)",
@@ -24,8 +28,14 @@
       "Rate\\s*:\\s*VND?\\s*([\\d.,]+)"
     ],
     "monthly": [
-      "([\\d.,]+)\\s*(?:net)?/?\\s*(?:per\\s+)?month",
-      "([\\d.,]+)\\s*VND\\s*/\\s*month"
+    "([\\d.,]+)\\s*(?:net)?/?\\s*(?:per\\s+)?month",
+    "([\\d.,]+)\\s*VND\\s*/\\s*month",
+    "([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
+    "TOTAL\\s+([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
+    "([\\d.,]+)\\s*NETT\\s*MONTH",
+    "([\\d.,]+)\\s*net\\s*month",
+    "monthly\\s*rate\\s*:?\\s*([\\d.,]+)",
+    "/month"
     ]
   },
   "skip_keywords": [
@@ -36,7 +46,9 @@
     "VAT",
     "discount",
     "complimentary",
-    "free"
+    "free",
+    "laundry",
+    "buffet"
   ],
   "rate_cleaning": {
     "remove_commas": true,

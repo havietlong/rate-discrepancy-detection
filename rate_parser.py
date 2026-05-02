@@ -116,15 +116,10 @@ class RateParser:
     def parse_rates(self, comment_text, target_date):
         """
         Main function to parse rates from comment text
-        Priority order:
-        1. Date-specific (most specific)
-        2. NETT rates
-        3. ++ rates (new)
-        4. Flat rates
         """
-        # Skip if contains monthly indicators
+        # Skip if contains monthly indicators (monthly guests are always correct)
         if self.detect_monthly(comment_text):
-            return None, "Monthly rate - skipped", {'monthly': True}
+            return None, "Monthly rate - skipped (assumed correct)", {'monthly': True, 'skip': True}
         
         # Priority 1: Date-specific rates
         rate, source, start, end = self.detect_date_specific_rate(comment_text, target_date)
@@ -136,7 +131,7 @@ class RateParser:
         if rate:
             return rate, source, {'type': 'nett'}
         
-        # Priority 3: ++ rates (NEW)
+        # Priority 3: ++ rates
         rate, source = self.detect_pp_rate(comment_text)
         if rate:
             return rate, source, {'type': 'pp'}
