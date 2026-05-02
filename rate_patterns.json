@@ -1,0 +1,41 @@
+{
+  "patterns": {
+    "date_specific": [
+      "RATE\\s*AMOUNT\\w*\\s*->([\\d,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})",
+      "SHAREAMOUNT\\w*\\s*->([\\d,]+).*?from\\s*(\\d{2}-[A-Z]{3}-\\d{2})\\s*to\\s*(\\d{2}-[A-Z]{3}-\\d{2})"
+    ],
+    "nett_rates": [
+      "VND?\\s*([\\d,]+)\\s+NETT",
+      "VND?\\s*([\\d,]+)\\s+net",
+      "([\\d,]+)\\s+NETT",
+      "([\\d,]+)\\s+net",
+      "Total RC.*?(\\d{1,3}(?:,\\d{3})*)\\s+net",
+      "Total\\s+(\\d{1,3}(?:,\\d{3})*)\\s+VND\\s+net"
+    ],
+    "flat_rates": [
+      "RATE\\s*AMOUNT\\w*\\s*->([\\d,]+)(?:\\s|\\.|$)",
+      "SHAREAMOUNT\\w*\\s*->([\\d,]+)(?:\\s|\\.|$)",
+      "Rate\\s*:\\s*VND?\\s*([\\d,]+)"
+    ],
+    "monthly": [
+      "([\\d,]+)\\s*(?:net)?/?\\s*(?:per\\s+)?month",
+      "([\\d,]+)\\s*VND\\s*/\\s*month"
+    ]
+  },
+  "skip_keywords": [
+    "deposit",
+    "deposited",
+    "prepaid",
+    "paid",
+    "VAT",
+    "discount",
+    "complimentary",
+    "free"
+  ],
+  "rate_cleaning": {
+    "remove_commas": true,
+    "fix_missing_zeros": true,
+    "minimum_rate": 100000,
+    "maximum_rate": 100000000
+  }
+}

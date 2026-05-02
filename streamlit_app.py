@@ -8,6 +8,9 @@ from io import BytesIO
 import base64
 import os
 import fitz  # PyMuPDF
+from rate_parser import RateParser
+
+rate_parser = RateParser("rate_patterns.json")
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
 st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
@@ -209,89 +212,16 @@ def debug_extract_comment_section(text, room_number):
     return None
 
 def debug_parse_rates(comment_text, target_date):
-    """Return all rates found, not just the best match"""
-    results = {
-        'selected_rate': None,
-        'selected_reason': None,
-        'monthly_detected': False,
-        'flat_rates': [],
+    """Parse rates using the external RateParser"""
+    result = rate_parser.parse_rates(comment_text, target_date)
+    
+    return {
+        'selected_rate': result[0],
+        'selected_reason': result[1],
+        'monthly_detected': result[2].get('monthly', False),
+        'flat_rates': [result[0]] if result[0] else [],
         'date_specific_rates': []
     }
-    
-    # Check for monthly - these will be SKIPPED entirely
-    if re.search(r'[\d,]+\s*(?:net)?/?\s*(?:per\s+)?month', comment_text, re.IGNORECASE):
-        results['monthly_detected'] = True
-        results['selected_rate'] = None
-        results['selected_reason'] = "SKIP - Monthly rate (assumed correct)"
-        return results
-    
-     # NEW: Check for NETT rates (e.g., "VND2,100,000 NETT" or "2,100,000 NETT")
-    nett_pattern = r'VND?\s*([\d,]+)\s+NETT'
-    nett_match = re.search(nett_pattern, comment_text, re.IGNORECASE)
-    if nett_match:
-        rate_str = nett_match.group(1).replace(',', '')
-        rate = float(rate_str)
-        
-        # Fix common typo: missing zero (e.g., "2,100,00" -> 2100000)
-        if rate < 1000000 and rate > 100000 and 'nett' in comment_text.lower():
-            # If rate is in hundred-thousands but should be millions
-            rate = rate * 10
-        
-        results['selected_rate'] = rate
-        results['selected_reason'] = "NETT rate (assumed correct format)"
-        return results
-    
-    # Also check for "net" without all caps
-    net_pattern = r'VND?\s*([\d,]+)\s+net'
-    net_match = re.search(net_pattern, comment_text, re.IGNORECASE)
-    if net_match:
-        rate = float(net_match.group(1).replace(',', ''))
-        results['selected_rate'] = rate
-        results['selected_reason'] = "NET rate (assumed to be ++? needs comparison)"
-        return results
-    
-    # Date-specific rates
-    date_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
-    matches = re.findall(date_pattern, comment_text, re.IGNORECASE)
-    
-    for rate_str, start_str, end_str in matches:
-        rate = float(rate_str.replace(',', ''))
-        try:
-            start_date = datetime.strptime(start_str, '%d-%b-%y')
-            end_date = datetime.strptime(end_str, '%d-%b-%y')
-            
-            is_applicable = (start_date <= target_date <= end_date)
-            
-            results['date_specific_rates'].append({
-                'rate': rate,
-                'start': start_str,
-                'end': end_str,
-                'applicable': is_applicable
-            })
-            
-            if is_applicable:
-                results['selected_rate'] = rate
-                results['selected_reason'] = f"Date-specific: {start_str} to {end_str}"
-        except:
-            continue
-    
-    # Flat rates (no date range)
-    if results['selected_rate'] is None:
-        flat_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+)(?:\s|$|\.)'
-        flat_matches = re.findall(flat_pattern, comment_text, re.IGNORECASE)
-        
-        for rate_str in flat_matches:
-            rate = float(rate_str.replace(',', ''))
-            results['flat_rates'].append(rate)
-        
-        if results['flat_rates']:
-            results['selected_rate'] = results['flat_rates'][0]
-            results['selected_reason'] = "Flat rate (no date range)"
-    
-    if results['selected_rate'] is None:
-        results['selected_reason'] = "No rate found"
-    
-    return results
 
 # ========== SIDEBAR ==========
 
