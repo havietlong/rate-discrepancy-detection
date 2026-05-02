@@ -268,10 +268,13 @@ if uploaded_file:
             status = "unknown"
             decision_reason = ""
             what_to_change = ""
+
+            comment_rate = parse_result['selected_rate']
+            has_adjustment = parse_result.get('has_adjustment', False)
             
             if comment_rate is None:
                 if parse_result['monthly_detected']:
-                    status = "correct"  # Monthly guests are correct - NO HIGHLIGHT
+                    status = "correct"
                     decision_reason = "Monthly rate - assumed correct (no action needed)"
                 else:
                     status = "manual_check"
@@ -279,18 +282,33 @@ if uploaded_file:
             else:
                 tolerance = comment_rate * (tolerance_percent / 100)
                 
+                # If there's a rate adjustment mentioned, we should be more lenient
+                if has_adjustment:
+                    # Use a wider tolerance for adjusted rates
+                    tolerance = comment_rate * (tolerance_percent * 2 / 100)
+                
                 if abs(comment_rate - system_rate) <= tolerance:
                     status = "correct"
                     decision_reason = f"Rate matches (diff: {abs(comment_rate - system_rate):,.0f})"
+                    if has_adjustment:
+                        decision_reason += " - Note: rate adjustment mentioned in comment"
                 else:
                     expected_net = system_rate * TAX_RATE
                     if abs(comment_rate - expected_net) <= tolerance:
                         status = "correct"
-                        decision_reason = f"NET rate properly converts to ++ (comment {comment_rate:,.0f} = system {system_rate:,.0f} × {TAX_RATE})"
+                        decision_reason = f"NET rate properly converts to ++"
+                        if has_adjustment:
+                            decision_reason += " - Note: rate adjustment mentioned in comment"
                     else:
-                        status = "fix"
-                        decision_reason = f"Rate mismatch: comment {comment_rate:,.0f} ≠ system {system_rate:,.0f}"
-                        what_to_change = f"Change from {system_rate:,.0f} to {comment_rate:,.0f}"
+                        # Only flag as fix if NO adjustment is mentioned
+                        if has_adjustment:
+                            status = "manual_check"
+                            decision_reason = f"Rate mismatch but adjustment mentioned: comment {comment_rate:,.0f} ≠ system {system_rate:,.0f}"
+                            what_to_change = "VERIFY adjustment calculation"
+                        else:
+                            status = "fix"
+                            decision_reason = f"Rate mismatch: comment {comment_rate:,.0f} ≠ system {system_rate:,.0f}"
+                            what_to_change = f"Change from {system_rate:,.0f} to {comment_rate:,.0f}"
             
             # Check for manual override
             override_key = f"{room_num}_{current_date}"
