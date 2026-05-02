@@ -225,6 +225,31 @@ def debug_parse_rates(comment_text, target_date):
         results['selected_reason'] = "SKIP - Monthly rate (assumed correct)"
         return results
     
+     # NEW: Check for NETT rates (e.g., "VND2,100,000 NETT" or "2,100,000 NETT")
+    nett_pattern = r'VND?\s*([\d,]+)\s+NETT'
+    nett_match = re.search(nett_pattern, comment_text, re.IGNORECASE)
+    if nett_match:
+        rate_str = nett_match.group(1).replace(',', '')
+        rate = float(rate_str)
+        
+        # Fix common typo: missing zero (e.g., "2,100,00" -> 2100000)
+        if rate < 1000000 and rate > 100000 and 'nett' in comment_text.lower():
+            # If rate is in hundred-thousands but should be millions
+            rate = rate * 10
+        
+        results['selected_rate'] = rate
+        results['selected_reason'] = "NETT rate (assumed correct format)"
+        return results
+    
+    # Also check for "net" without all caps
+    net_pattern = r'VND?\s*([\d,]+)\s+net'
+    net_match = re.search(net_pattern, comment_text, re.IGNORECASE)
+    if net_match:
+        rate = float(net_match.group(1).replace(',', ''))
+        results['selected_rate'] = rate
+        results['selected_reason'] = "NET rate (assumed to be ++? needs comparison)"
+        return results
+    
     # Date-specific rates
     date_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+).*?from\s*(\d{2}-[A-Z]{3}-\d{2})\s*to\s*(\d{2}-[A-Z]{3}-\d{2})'
     matches = re.findall(date_pattern, comment_text, re.IGNORECASE)
