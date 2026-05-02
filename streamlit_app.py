@@ -7,6 +7,7 @@ import json
 from io import BytesIO
 import base64
 import os
+import fitz
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
 st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
@@ -24,6 +25,89 @@ if 'selected_room' not in st.session_state:
     st.session_state.selected_room = None
 
 # ========== FUNCTIONS ==========
+
+import fitz  # PyMuPDF
+
+def highlight_pdf_boxes(pdf_bytes, fix_rooms_list, manual_rooms_list):
+    """
+    Draw colored boxes around room numbers in the PDF
+    - RED boxes with "FIX" for rooms that need rate changes
+    - YELLOW boxes with "CHECK" for rooms that need manual review
+    """
+    # Open the PDF from bytes
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    
+    # Convert room lists to strings for comparison
+    fix_room_strings = [str(room_num) for room_num in fix_rooms_list]
+    manual_room_strings = [str(room_num) for room_num in manual_rooms_list]
+    all_room_strings = fix_room_strings + manual_room_strings
+    
+    # Track which rooms we've highlighted (for logging)
+    highlighted_rooms = []
+    
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        
+        # Search for each room number on the page
+        for room_num in all_room_strings:
+            # Search for the room number as a word (not part of a larger number)
+            text_instances = page.search_for(room_num)
+            
+            for inst in text_instances:
+                # Choose color based on room type
+                if room_num in fix_room_strings:
+                    # RED for fix (stroke in RGB)
+                    annot = page.add_rect_annot(inst)
+                    annot.set_colors(stroke=(1, 0, 0))  # Red
+                    annot.set_border(width=2.5)
+                    annot.update()
+                    
+                    # Add "FIX" label above the box
+                    label_rect = fitz.Rect(inst.x0, inst.y0 - 12, inst.x0 + 25, inst.y0)
+                    page.draw_rect(label_rect, color=(1, 0, 0), fill=(1, 0, 0))
+                    page.insert_text(
+                        (inst.x0 + 2, inst.y0 - 3), 
+                        "FIX", 
+                        fontsize=9, 
+                        color=(1, 1, 1),  # White text
+                        fontname="helv"
+                    )
+                    
+                    if room_num not in highlighted_rooms:
+                        highlighted_rooms.append(room_num)
+                        
+                else:  # manual check room
+                    # YELLOW for manual check (stroke in RGB)
+                    annot = page.add_rect_annot(inst)
+                    annot.set_colors(stroke=(1, 1, 0))  # Yellow
+                    annot.set_border(width=2.5)
+                    annot.update()
+                    
+                    # Add "CHECK" label above the box
+                    label_rect = fitz.Rect(inst.x0, inst.y0 - 12, inst.x0 + 40, inst.y0)
+                    page.draw_rect(label_rect, color=(1, 1, 0), fill=(1, 1, 0))
+                    page.insert_text(
+                        (inst.x0 + 2, inst.y0 - 3), 
+                        "CHECK", 
+                        fontsize=8, 
+                        color=(0, 0, 0),  # Black text
+                        fontname="helv"
+                    )
+                    
+                    if room_num not in highlighted_rooms:
+                        highlighted_rooms.append(room_num)
+    
+    # Log what was highlighted
+    if highlighted_rooms:
+        st.write(f"✅ Highlighted rooms: {', '.join(highlighted_rooms)}")
+    else:
+        st.write("⚠️ No room numbers found to highlight. Check if PDF text is selectable.")
+    
+    # Save the modified PDF to bytes
+    output_bytes = doc.tobytes()
+    doc.close()
+    
+    return output_bytes
 
 def check_dependencies():
     """Check if all required dependencies are available"""
@@ -479,37 +563,77 @@ if uploaded_file:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
             
-    # TAB 2: PDF Viewer with Highlighting
+    # TAB 2: PDF Viewer with Highlighting (PyMuPDF Version)
     with tab2:
-        st.subheader("📄 PDF Document Viewer")
+        st.subheader("📄 PDF with Automatic Highlighting")
         
-        # --- Get the list of rooms that need to be fixed ---
+        # Get rooms by status
         fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
+        manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
         
-        # --- Display actionable information above the PDF ---
+        # Show summary of what will be highlighted
         if fix_rooms:
-            st.error(f"⚠️ {len(fix_rooms)} room(s) require your attention.")
-            st.markdown(f"**🔍 Search for these room numbers in the PDF below:** {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
-        else:
-            st.success("✅ No discrepancies found! All rates match.")
-
+            st.error(f"🔴 {len(fix_rooms)} room(s) will be highlighted in RED")
+            st.markdown(f"**Fix these:** {', '.join([str(r['room']) for r in fix_rooms[:15]])}")
+            if len(fix_rooms) > 15:
+                st.caption(f"... and {len(fix_rooms) - 15} more")
+        
+        if manual_rooms:
+            st.warning(f"🟡 {len(manual_rooms)} room(s) will be highlighted in YELLOW")
+            st.markdown(f"**Check these:** {', '.join([str(r['room']) for r in manual_rooms[:15]])}")
+        
+        if not fix_rooms and not manual_rooms:
+            st.success("✅ No discrepancies found — no highlights needed")
+        
         st.markdown("---")
         
-        # --- The robust PDF viewer using st.pdf ---
-        # This handles the direct byte data from your uploaded file.
-        # The 'height' parameter ensures it fits well in the tab.
-        st.pdf(pdf_bytes, height=700)
-        
-        # --- Provide a fallback download button just in case ---
-        with st.expander("Having trouble viewing the PDF?"):
+        # Generate highlighted PDF
+        if fix_rooms or manual_rooms:
+            with st.spinner("🎨 Drawing highlight boxes on PDF (this may take 10-20 seconds)..."):
+                fix_room_numbers = [r['room'] for r in fix_rooms]
+                manual_room_numbers = [r['room'] for r in manual_rooms]
+                
+                try:
+                    highlighted_pdf = highlight_pdf_boxes(pdf_bytes, fix_room_numbers, manual_room_numbers)
+                    st.success("✅ PDF highlighted successfully!")
+                    
+                    # Display the highlighted PDF
+                    st.pdf(highlighted_pdf, height=700)
+                    
+                    # Legend
+                    st.markdown("""
+                    ---
+                    **📖 Legend:**
+                    - 🔴 **RED BOX** with "FIX" = Room rate needs to be changed
+                    - 🟡 **YELLOW BOX** with "CHECK" = Room needs manual review
+                    
+                    **💡 Tip:** Click on the PDF to zoom in on highlighted areas.
+                    """)
+                    
+                    # Download button for highlighted version
+                    st.download_button(
+                        label="📥 Download Highlighted PDF (with colored boxes)",
+                        data=highlighted_pdf,
+                        file_name="highlighted_audit_report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                    
+                except Exception as e:
+                    st.error(f"Highlighting failed: {str(e)}")
+                    st.info("Showing original PDF without highlights.")
+                    st.pdf(pdf_bytes, height=700)
+        else:
+            # No highlights needed, just show original
+            st.pdf(pdf_bytes, height=700)
+            
             st.download_button(
-                label="📥 Click here to download the PDF file instead",
+                label="📥 Download PDF",
                 data=pdf_bytes,
                 file_name="night_audit_report.pdf",
                 mime="application/pdf",
-                use_container_width=True,
+                use_container_width=True
             )
-            st.caption("If the PDF viewer above is blank, you can download the file to view it locally.")
     # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")

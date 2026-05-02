@@ -2,6 +2,7 @@ streamlit
 streamlit[pdf]
 pdfplumber
 pandas
+pymupdf
 pdf2image
 pytesseract
 opencv-python-headless
