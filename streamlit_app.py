@@ -478,100 +478,38 @@ if uploaded_file:
             else:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
-            # TAB 2: PDF Viewer with Highlighting
-        # TAB 2: PDF Viewer with Highlighting
+            
+    # TAB 2: PDF Viewer with Highlighting
     with tab2:
-        st.subheader("📄 PDF with Room Highlighting")
+        st.subheader("📄 PDF Document Viewer")
         
+        # --- Get the list of rooms that need to be fixed ---
         fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
         
+        # --- Display actionable information above the PDF ---
         if fix_rooms:
-            st.warning(f"🔍 Rooms to check: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
-        
+            st.error(f"⚠️ {len(fix_rooms)} room(s) require your attention.")
+            st.markdown(f"**🔍 Search for these room numbers in the PDF below:** {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+        else:
+            st.success("✅ No discrepancies found! All rates match.")
+
         st.markdown("---")
         
-        # Download button as fallback
-        col1, col2 = st.columns([3, 1])
-        with col2:
+        # --- The robust PDF viewer using st.pdf ---
+        # This handles the direct byte data from your uploaded file.
+        # The 'height' parameter ensures it fits well in the tab.
+        st.pdf(pdf_bytes, height=700)
+        
+        # --- Provide a fallback download button just in case ---
+        with st.expander("Having trouble viewing the PDF?"):
             st.download_button(
-                label="📥 Download PDF",
+                label="📥 Click here to download the PDF file instead",
                 data=pdf_bytes,
                 file_name="night_audit_report.pdf",
-                mime="application/pdf"
+                mime="application/pdf",
+                use_container_width=True,
             )
-        
-        with col1:
-            st.markdown("**PDF Preview:**")
-        
-        st.markdown("---")
-        
-        # Convert PDF to base64 for the JavaScript Blob
-        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-        
-        # HTML with JavaScript to create Blob URL and display PDF
-        pdf_viewer_html = f'''
-        <div id="pdf-viewer-wrapper" style="width:100%; height:750px; border:1px solid #ddd; border-radius:8px; overflow:hidden; background:#f0f0f0;">
-            <div id="pdf-loading" style="display:flex; justify-content:center; align-items:center; height:100%; flex-direction:column;">
-                <div style="font-size:24px; margin-bottom:10px;">📄</div>
-                <div>Loading PDF viewer...</div>
-                <div style="font-size:12px; color:#666; margin-top:10px;">Please wait a moment</div>
-            </div>
-            <iframe id="pdf-iframe" 
-                    style="width:100%; height:100%; border:none; display:none;"
-                    sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals"
-                    title="PDF Viewer">
-            </iframe>
-        </div>
-        
-        <script>
-        (function() {{
-            var base64Data = '{base64_pdf}';
-            var loadingDiv = document.getElementById('pdf-loading');
-            var iframe = document.getElementById('pdf-iframe');
-            
-            function base64ToBlob(base64, mimeType) {{
-                var byteCharacters = atob(base64);
-                var byteNumbers = new Array(byteCharacters.length);
-                for (var i = 0; i < byteCharacters.length; i++) {{
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                }}
-                var byteArray = new Uint8Array(byteNumbers);
-                return new Blob([byteArray], {{type: mimeType}});
-            }}
-            
-            function displayPdfInIframe() {{
-                try {{
-                    var blob = base64ToBlob(base64Data, 'application/pdf');
-                    var blobUrl = URL.createObjectURL(blob);
-                    
-                    iframe.src = blobUrl;
-                    iframe.style.display = 'block';
-                    loadingDiv.style.display = 'none';
-                    
-                    // Clean up blob URL after a delay
-                    setTimeout(function() {{
-                        URL.revokeObjectURL(blobUrl);
-                    }}, 60000);
-                }} catch(e) {{
-                    loadingDiv.innerHTML = '<div style="color:red;">❌ Failed to load PDF. <a href="data:application/pdf;base64,{base64_pdf}">Click here to open</a></div>';
-                    console.error('PDF loading error:', e);
-                }}
-            }}
-            
-            // Wait for page to be ready
-            if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', displayPdfInIframe);
-            }} else {{
-                displayPdfInIframe();
-            }}
-        }})();
-        </script>
-        '''
-        
-        st.components.v1.html(pdf_viewer_html, height=800)
-        
-        # Add helpful tip
-        st.caption("💡 Tip: Use Ctrl+F inside the PDF to search for room numbers")
+            st.caption("If the PDF viewer above is blank, you can download the file to view it locally.")
     # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
