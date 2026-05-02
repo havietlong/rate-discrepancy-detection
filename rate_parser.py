@@ -15,10 +15,12 @@ class RateParser:
     def clean_rate(self, rate_str, original_text=""):
         """
         Clean and convert rate string to float
-        Also fix common typos like missing zeros
+        Handles commas AND dots as thousand separators
         """
-        # Remove commas
+        # Remove both commas and dots (they are thousand separators)
+        # But careful: dot could be decimal in some cases (not in VND)
         rate_str = rate_str.replace(',', '')
+        rate_str = rate_str.replace('.', '')  # Remove dot thousand separators
         
         try:
             rate = float(rate_str)
@@ -39,6 +41,19 @@ class RateParser:
             return None
         
         return rate
+    
+    def detect_pp_rate(self, text):
+        """
+        Detect ++ rates (e.g., 'VND 2.050.000++' or '2,050,000++')
+        """
+        for pattern in self.patterns['pp_rates']:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                rate_str = match.group(1)
+                rate = self.clean_rate(rate_str, text)
+                if rate:
+                    return rate, "++ rate detected"
+        return None, None
     
     def detect_monthly(self, text):
         """Check if this is a monthly rate (should be skipped)"""
@@ -101,13 +116,17 @@ class RateParser:
     def parse_rates(self, comment_text, target_date):
         """
         Main function to parse rates from comment text
-        Returns: (rate, rate_source, metadata)
+        Priority order:
+        1. Date-specific (most specific)
+        2. NETT rates
+        3. ++ rates (new)
+        4. Flat rates
         """
         # Skip if contains monthly indicators
         if self.detect_monthly(comment_text):
             return None, "Monthly rate - skipped", {'monthly': True}
         
-        # Priority 1: Date-specific rates (most specific)
+        # Priority 1: Date-specific rates
         rate, source, start, end = self.detect_date_specific_rate(comment_text, target_date)
         if rate:
             return rate, source, {'date_range': {'start': start, 'end': end}}
@@ -117,7 +136,12 @@ class RateParser:
         if rate:
             return rate, source, {'type': 'nett'}
         
-        # Priority 3: Flat rates
+        # Priority 3: ++ rates (NEW)
+        rate, source = self.detect_pp_rate(comment_text)
+        if rate:
+            return rate, source, {'type': 'pp'}
+        
+        # Priority 4: Flat rates
         rate, source = self.detect_flat_rate(comment_text)
         if rate:
             return rate, source, {'type': 'flat'}
