@@ -7,7 +7,7 @@ import json
 from io import BytesIO
 import base64
 import os
-import fitz
+import fitz  # PyMuPDF
 
 st.set_page_config(page_title="Rate Discrepancy Scanner", page_icon="🔍", layout="wide")
 st.title("🔍 Rate Discrepancy Scanner - Visual Highlighting")
@@ -26,7 +26,19 @@ if 'selected_room' not in st.session_state:
 
 # ========== FUNCTIONS ==========
 
-import fitz  # PyMuPDF
+def is_valid_room(room_num):
+    """
+    Check if room number is valid based on property:
+    - Floor 04 to 16
+    - Room position 01 to 12
+    - Must be 4 digits after normalization
+    """
+    room_str = str(room_num).zfill(4)
+    room_int = int(room_str)
+    floor = room_int // 100
+    position = room_int % 100
+    return (4 <= floor <= 16) and (1 <= position <= 12)
+
 
 def highlight_pdf_boxes(pdf_bytes, fix_rooms_list, manual_rooms_list):
     """
@@ -37,109 +49,151 @@ def highlight_pdf_boxes(pdf_bytes, fix_rooms_list, manual_rooms_list):
     # Open the PDF from bytes
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     
-    # Convert room lists to strings for comparison
-    fix_room_strings = [str(room_num) for room_num in fix_rooms_list]
-    manual_room_strings = [str(room_num) for room_num in manual_rooms_list]
-    all_room_strings = fix_room_strings + manual_room_strings
+    # Convert to strings and normalize (pad to 4 digits for matching)
+    fix_room_strings = [str(room_num).zfill(4) for room_num in fix_rooms_list]
+    manual_room_strings = [str(room_num).zfill(4) for room_num in manual_rooms_list]
     
-    # Track which rooms we've highlighted (for logging)
-    highlighted_rooms = []
+    # Also keep original formats for matching
+    fix_room_variants = {}
+    for room in fix_rooms_list:
+        room_str = str(room)
+        fix_room_variants[room_str] = True
+        fix_room_variants[room_str.zfill(4)] = True
+        fix_room_variants[room_str.lstrip('0')] = True
+    
+    manual_room_variants = {}
+    for room in manual_rooms_list:
+        room_str = str(room)
+        manual_room_variants[room_str] = True
+        manual_room_variants[room_str.zfill(4)] = True
+        manual_room_variants[room_str.lstrip('0')] = True
+    
+    all_fix_variants = set(fix_room_variants.keys())
+    all_manual_variants = set(manual_room_variants.keys())
+    
+    # Track highlighted rooms
+    highlighted_fix = []
+    highlighted_manual = []
     
     for page_num in range(len(doc)):
         page = doc[page_num]
         
-        # Search for each room number on the page
-        for room_num in all_room_strings:
-            # Search for the room number as a word (not part of a larger number)
-            text_instances = page.search_for(room_num)
+        # Get all text on the page
+        page_text = page.get_text()
+        
+        # Find all 3-4 digit numbers that could be room numbers
+        import re
+        potential_rooms = re.findall(r'\b\d{3,4}\b', page_text)
+        
+        for potential_room in potential_rooms:
+            # FIRST: Validate it's a real room number based on property layout
+            if not is_valid_room(potential_room):
+                continue
             
-            for inst in text_instances:
-                # Choose color based on room type
-                if room_num in fix_room_strings:
-                    # RED for fix (stroke in RGB)
-                    annot = page.add_rect_annot(inst)
-                    annot.set_colors(stroke=(1, 0, 0))  # Red
-                    annot.set_border(width=2.5)
-                    annot.update()
-                    
-                    # Add "FIX" label above the box
-                    label_rect = fitz.Rect(inst.x0, inst.y0 - 12, inst.x0 + 25, inst.y0)
-                    page.draw_rect(label_rect, color=(1, 0, 0), fill=(1, 0, 0))
-                    page.insert_text(
-                        (inst.x0 + 2, inst.y0 - 3), 
-                        "FIX", 
-                        fontsize=9, 
-                        color=(1, 1, 1),  # White text
-                        fontname="helv"
-                    )
-                    
-                    if room_num not in highlighted_rooms:
-                        highlighted_rooms.append(room_num)
+            # Skip invalid room numbers
+            room_int = int(potential_room)
+            if room_int == 0 or room_int > 9999:
+                continue
+            if potential_room.startswith('20') and len(potential_room) == 4:
+                continue  # Skip years like 2026
+            
+            # Check if this room is in our lists
+            is_fix = potential_room in all_fix_variants
+            is_manual = potential_room in all_manual_variants
+            
+            if is_fix or is_manual:
+                # Find exact position of this room number
+                text_instances = page.search_for(potential_room)
+                
+                for inst in text_instances:
+                    if is_fix and potential_room not in highlighted_fix:
+                        # RED for fix
+                        annot = page.add_rect_annot(inst)
+                        annot.set_colors(stroke=(1, 0, 0))
+                        annot.set_border(width=2.5)
+                        annot.update()
                         
-                else:  # manual check room
-                    # YELLOW for manual check (stroke in RGB)
-                    annot = page.add_rect_annot(inst)
-                    annot.set_colors(stroke=(1, 1, 0))  # Yellow
-                    annot.set_border(width=2.5)
-                    annot.update()
+                        # Add "FIX" label above the box
+                        label_rect = fitz.Rect(inst.x0, inst.y0 - 14, inst.x0 + 30, inst.y0)
+                        page.draw_rect(label_rect, color=(1, 0, 0), fill=(1, 0, 0))
+                        page.insert_text(
+                            (inst.x0 + 2, inst.y0 - 3), 
+                            "FIX", 
+                            fontsize=9, 
+                            color=(1, 1, 1),
+                            fontname="helv"
+                        )
+                        highlighted_fix.append(potential_room)
                     
-                    # Add "CHECK" label above the box
-                    label_rect = fitz.Rect(inst.x0, inst.y0 - 12, inst.x0 + 40, inst.y0)
-                    page.draw_rect(label_rect, color=(1, 1, 0), fill=(1, 1, 0))
-                    page.insert_text(
-                        (inst.x0 + 2, inst.y0 - 3), 
-                        "CHECK", 
-                        fontsize=8, 
-                        color=(0, 0, 0),  # Black text
-                        fontname="helv"
-                    )
-                    
-                    if room_num not in highlighted_rooms:
-                        highlighted_rooms.append(room_num)
+                    elif is_manual and potential_room not in highlighted_manual:
+                        # YELLOW for manual check
+                        annot = page.add_rect_annot(inst)
+                        annot.set_colors(stroke=(1, 1, 0))
+                        annot.set_border(width=2.5)
+                        annot.update()
+                        
+                        # Add "CHECK" label above the box
+                        label_rect = fitz.Rect(inst.x0, inst.y0 - 14, inst.x0 + 45, inst.y0)
+                        page.draw_rect(label_rect, color=(1, 1, 0), fill=(1, 1, 0))
+                        page.insert_text(
+                            (inst.x0 + 2, inst.y0 - 3), 
+                            "CHECK", 
+                            fontsize=8, 
+                            color=(0, 0, 0),
+                            fontname="helv"
+                        )
+                        highlighted_manual.append(potential_room)
     
-    # Log what was highlighted
-    if highlighted_rooms:
-        st.write(f"✅ Highlighted rooms: {', '.join(highlighted_rooms)}")
-    else:
-        st.write("⚠️ No room numbers found to highlight. Check if PDF text is selectable.")
-    
-    # Save the modified PDF to bytes
+    # Save the modified PDF
     output_bytes = doc.tobytes()
     doc.close()
     
     return output_bytes
 
-def check_dependencies():
-    """Check if all required dependencies are available"""
-    import subprocess
-    import importlib
+def extract_room_actual_rates(text):
+    """
+    Extract each room's actual posted rate from the Rate Amt. column (with VND)
+    Only includes valid room numbers matching pattern:
+    - Floor 04-16, Room 01-12 (e.g., 0401 to 1612)
+    """
+    rooms = {}
     
-    results = {}
+    # Pattern: room number, name, then a number with VND (this is the Rate Amt.)
+    pattern = r'(\d{3,4})\s+([A-Za-z][^0-9]{10,60}?)\s+.*?(\d{1,3}(?:,\d{3})*)\s+VND'
     
-    # Check poppler
-    try:
-        result = subprocess.run(['pdfinfo', '-v'], capture_output=True, text=True)
-        results['poppler'] = "✅ Available"
-    except FileNotFoundError:
-        results['poppler'] = "❌ Not found"
+    matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
     
-    # Check tesseract
-    try:
-        result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
-        results['tesseract'] = "✅ Available"
-    except FileNotFoundError:
-        results['tesseract'] = "❌ Not found"
-    
-    # Check Python packages
-    packages = ['pdf2image', 'pytesseract', 'cv2', 'PIL']
-    for pkg in packages:
+    for room_num, guest_name, rate_str in matches:
+        # Pad to 4 digits if needed (e.g., "403" -> "0403")
+        room_str = room_num.zfill(4)
+        room_int = int(room_str)
+        
+        # VALID ROOM VALIDATION
+        floor = room_int // 100  # First two digits
+        position = room_int % 100  # Last two digits
+        
+        # Valid: floor 4-16, position 1-12
+        is_valid_room = (4 <= floor <= 16) and (1 <= position <= 12)
+        
+        if not is_valid_room:
+            continue  # Skip invalid room numbers
+        
+        # Clean and convert rate
+        rate_str_clean = rate_str.replace(',', '')
         try:
-            importlib.import_module(pkg)
-            results[pkg] = "✅ Available"
-        except ImportError:
-            results[pkg] = "❌ Missing"
+            actual_rate = float(rate_str_clean)
+            
+            # Only add if room not already captured
+            if room_str not in rooms:
+                rooms[room_str] = {
+                    'room': room_str,
+                    'guest': guest_name.strip()[:50],
+                    'system_rate': actual_rate
+                }
+        except:
+            continue
     
-    return results
+    return rooms
 
 def debug_extract_comment_section(text, room_number):
     """Extract and return the exact comment section with boundaries"""
@@ -164,7 +218,7 @@ def debug_parse_rates(comment_text, target_date):
         'date_specific_rates': []
     }
     
-    # Check for monthly
+    # Check for monthly - these will be SKIPPED entirely
     if re.search(r'[\d,]+\s*(?:net)?/?\s*(?:per\s+)?month', comment_text, re.IGNORECASE):
         results['monthly_detected'] = True
         results['selected_rate'] = None
@@ -180,7 +234,6 @@ def debug_parse_rates(comment_text, target_date):
         try:
             start_date = datetime.strptime(start_str, '%d-%b-%y')
             end_date = datetime.strptime(end_str, '%d-%b-%y')
-            nights = (end_date - start_date).days
             
             is_applicable = (start_date <= target_date <= end_date)
             
@@ -188,7 +241,6 @@ def debug_parse_rates(comment_text, target_date):
                 'rate': rate,
                 'start': start_str,
                 'end': end_str,
-                'nights': nights,
                 'applicable': is_applicable
             })
             
@@ -198,142 +250,23 @@ def debug_parse_rates(comment_text, target_date):
         except:
             continue
     
-    # Flat rates
-    flat_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+)(?:\s|$|\.)'
-    flat_matches = re.findall(flat_pattern, comment_text, re.IGNORECASE)
-    
-    for rate_str in flat_matches:
-        rate = float(rate_str.replace(',', ''))
-        results['flat_rates'].append(rate)
-    
-    # Fallback to flat rate
-    if results['selected_rate'] is None and results['flat_rates']:
-        results['selected_rate'] = results['flat_rates'][0]
-        results['selected_reason'] = "Flat rate (no date range)"
+    # Flat rates (no date range)
+    if results['selected_rate'] is None:
+        flat_pattern = r'RATE\s*AMOUNT\w*\s*->([\d,]+)(?:\s|$|\.)'
+        flat_matches = re.findall(flat_pattern, comment_text, re.IGNORECASE)
+        
+        for rate_str in flat_matches:
+            rate = float(rate_str.replace(',', ''))
+            results['flat_rates'].append(rate)
+        
+        if results['flat_rates']:
+            results['selected_rate'] = results['flat_rates'][0]
+            results['selected_reason'] = "Flat rate (no date range)"
     
     if results['selected_rate'] is None:
         results['selected_reason'] = "No rate found"
     
     return results
-
-def extract_room_actual_rates(text):
-    """Extract each room's actual posted rate"""
-    rooms = {}
-    
-    patterns = [
-        r'(\d{3,4})\s+([A-Za-z][^0-9]{5,60}?)\s+.*?([\d,]+)\s+VND',
-        r'(\d{3,4})\s+([A-Za-z][^,]+?)\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+(?:,\d{3})*\s+([\d,]+)\s+VND',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
-        for room_num, guest_name, rate_str in matches:
-            rate_str_clean = re.sub(r'[^\d]', '', rate_str)
-            if rate_str_clean:
-                try:
-                    actual_rate = float(rate_str_clean)
-                    if room_num not in rooms:
-                        rooms[room_num] = {
-                            'room': room_num,
-                            'guest': guest_name.strip()[:50],
-                            'system_rate': actual_rate
-                        }
-                except:
-                    continue
-    
-    return rooms
-
-def highlight_with_ocr(pdf_bytes, rooms_data, dpi=150):
-    """Advanced highlighting using OCR to find exact room positions"""
-    try:
-        from pdf2image import convert_from_bytes
-        import pytesseract
-        import cv2
-        import numpy as np
-    except ImportError:
-        return None
-    
-    # Explicit poppler path
-    poppler_path = "/usr/bin"
-    
-    # Convert PDF to images
-    with st.spinner("Converting PDF to images for OCR..."):
-        try:
-            images = convert_from_bytes(
-                pdf_bytes, 
-                dpi=dpi, 
-                fmt='jpeg',
-                poppler_path=poppler_path
-            )
-        except Exception:
-            return None
-    
-    highlighted_images = []
-    room_status = {str(room['room']): room['status'] for room in rooms_data}
-    
-    # Also check for room numbers with leading zeros
-    room_status_variants = {}
-    for room_num, status in room_status.items():
-        room_status_variants[room_num] = status
-        room_status_variants[room_num.lstrip('0')] = status
-    
-    for page_num, image in enumerate(images):
-        # Convert PIL to OpenCV
-        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        
-        # Run OCR to find text positions
-        data = pytesseract.image_to_data(img_cv, output_type=pytesseract.Output.DICT)
-        
-        boxes_drawn = 0
-        
-        # Draw boxes around each room number
-        for i, text in enumerate(data['text']):
-            text_clean = text.strip()
-            
-            status = None
-            if text_clean in room_status:
-                status = room_status[text_clean]
-            elif text_clean in room_status_variants:
-                status = room_status_variants[text_clean]
-            
-            if status:
-                x = data['left'][i]
-                y = data['top'][i]
-                w = data['width'][i]
-                h = data['height'][i]
-                
-                if status == 'fix':
-                    color = (0, 0, 255)
-                    thickness = 4
-                    label = "FIX"
-                elif status == 'manual_check':
-                    color = (0, 255, 255)
-                    thickness = 4
-                    label = "CHECK"
-                else:
-                    color = (0, 255, 0)
-                    thickness = 2
-                    label = "OK"
-                
-                cv2.rectangle(img_cv, (x, y), (x + w, y + h), color, thickness)
-                
-                # Draw label
-                label_bg_color = (0, 0, 0)
-                label_font_scale = 0.6
-                label_thickness = 2
-                (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_thickness)
-                cv2.rectangle(img_cv, (x, y - label_h - 4), (x + label_w + 4, y), label_bg_color, -1)
-                cv2.putText(img_cv, label, (x + 2, y - 4), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, color, label_thickness)
-                
-                boxes_drawn += 1
-        
-        # Add page number
-        cv2.putText(img_cv, f"Page {page_num + 1} | Boxes: {boxes_drawn}", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        highlighted_images.append(Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)))
-    
-    return highlighted_images
 
 # ========== SIDEBAR ==========
 
@@ -344,23 +277,8 @@ with st.sidebar:
     st.header("⚙️ Tolerance")
     tolerance_percent = st.slider("Rate tolerance (%)", 0.0, 5.0, 1.0, 0.1)
     
-    st.header("🎨 PDF Highlighting")
-    highlight_mode = st.radio(
-        "Highlighting mode:",
-        ["Fast (Ctrl+F search)", "Visual (red/yellow boxes - slower)"]
-    )
-    
     st.header("📁 Upload")
     uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")
-    
-    st.header("🔧 Diagnostics")
-    if st.button("Check Dependencies"):
-        deps = check_dependencies()
-        for name, status in deps.items():
-            if "✅" in status:
-                st.success(f"{name}: {status}")
-            else:
-                st.error(f"{name}: {status}")
 
 # ========== MAIN APP ==========
 
@@ -386,10 +304,8 @@ if uploaded_file:
             
             if comment_section_data:
                 comment_text = comment_section_data['comment_body']
-                header_text = comment_section_data['header']
             else:
                 comment_text = full_text
-                header_text = "No specific comment section found"
             
             parse_result = debug_parse_rates(comment_text, target_datetime)
             comment_rate = parse_result['selected_rate']
@@ -400,8 +316,8 @@ if uploaded_file:
             
             if comment_rate is None:
                 if parse_result['monthly_detected']:
-                    status = "correct"
-                    decision_reason = "Monthly rate - assumed correct"
+                    status = "correct"  # Monthly guests are correct - NO HIGHLIGHT
+                    decision_reason = "Monthly rate - assumed correct (no action needed)"
                 else:
                     status = "manual_check"
                     decision_reason = "No rate found in comments"
@@ -415,12 +331,13 @@ if uploaded_file:
                     expected_net = system_rate * TAX_RATE
                     if abs(comment_rate - expected_net) <= tolerance:
                         status = "correct"
-                        decision_reason = f"NET rate properly converts to ++"
+                        decision_reason = f"NET rate properly converts to ++ (comment {comment_rate:,.0f} = system {system_rate:,.0f} × {TAX_RATE})"
                     else:
                         status = "fix"
                         decision_reason = f"Rate mismatch: comment {comment_rate:,.0f} ≠ system {system_rate:,.0f}"
                         what_to_change = f"Change from {system_rate:,.0f} to {comment_rate:,.0f}"
             
+            # Check for manual override
             override_key = f"{room_num}_{current_date}"
             if override_key in st.session_state.overrides:
                 status = st.session_state.overrides[override_key]['status']
@@ -550,7 +467,7 @@ if uploaded_file:
                             st.write("**Date-specific rates:**")
                             for r in parse_result['date_specific_rates']:
                                 applicable = "✅ APPLICABLE" if r['applicable'] else "❌ Not applicable"
-                                st.write(f"  {r['rate']:,.0f} VND | {r['start']} to {r['end']} ({r['nights']} nights) - {applicable}")
+                                st.write(f"  {r['rate']:,.0f} VND | {r['start']} to {r['end']} - {applicable}")
                         
                         if parse_result['flat_rates']:
                             st.write("**Flat rates found:**")
@@ -562,25 +479,27 @@ if uploaded_file:
             else:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
-            
     # TAB 2: PDF Viewer with Highlighting (PyMuPDF Version)
     with tab2:
         st.subheader("📄 PDF with Automatic Highlighting")
         
-        # Get rooms by status
+        # Get rooms by status - ONLY fix and manual_check get highlighted
         fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
         manual_rooms = [r for r in all_rooms_data if r['status'] == 'manual_check']
         
         # Show summary of what will be highlighted
         if fix_rooms:
             st.error(f"🔴 {len(fix_rooms)} room(s) will be highlighted in RED")
-            st.markdown(f"**Fix these:** {', '.join([str(r['room']) for r in fix_rooms[:15]])}")
+            # Normalize to 4-digit display for consistency
+            normalized_fix = [str(r['room']).zfill(4) for r in fix_rooms]
+            st.markdown(f"**Fix these:** {', '.join(normalized_fix[:15])}")
             if len(fix_rooms) > 15:
                 st.caption(f"... and {len(fix_rooms) - 15} more")
         
         if manual_rooms:
             st.warning(f"🟡 {len(manual_rooms)} room(s) will be highlighted in YELLOW")
-            st.markdown(f"**Check these:** {', '.join([str(r['room']) for r in manual_rooms[:15]])}")
+            normalized_manual = [str(r['room']).zfill(4) for r in manual_rooms]
+            st.markdown(f"**Check these:** {', '.join(normalized_manual[:15])}")
         
         if not fix_rooms and not manual_rooms:
             st.success("✅ No discrepancies found — no highlights needed")
@@ -634,11 +553,15 @@ if uploaded_file:
                 mime="application/pdf",
                 use_container_width=True
             )
+    
     # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
         
         if st.session_state.training_data:
             st.write(f"Collected {len(st.session_state.training_data)} manual corrections")
+            training_list = list(st.session_state.training_data.values())
+            if training_list:
+                st.json(training_list[-5:])
         else:
-            st.info("No training data yet. Use manual override buttons to build your training set.")
+            st.info("No training data yet. Use manual override buttons in Tab 1 to build your training set.")
