@@ -28,14 +28,25 @@
       "Rate\\s*:\\s*VND?\\s*([\\d.,]+)"
     ],
     "monthly": [
-    "([\\d.,]+)\\s*(?:net)?/?\\s*(?:per\\s+)?month",
-    "([\\d.,]+)\\s*VND\\s*/\\s*month",
-    "([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
-    "TOTAL\\s+([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
-    "([\\d.,]+)\\s*NETT\\s*MONTH",
-    "([\\d.,]+)\\s*net\\s*month",
-    "monthly\\s*rate\\s*:?\\s*([\\d.,]+)",
-    "/month"
+      "([\\d.,]+)\\s*(?:net)?/?\\s*(?:per\\s+)?month",
+      "([\\d.,]+)\\s*VND\\s*/\\s*month",
+      "([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
+      "TOTAL\\s+([\\d.,]+)\\s*NETT\\s*/\\s*MONTH",
+      "([\\d.,]+)\\s*NETT\\s*MONTH",
+      "([\\d.,]+)\\s*net\\s*month",
+      "monthly\\s*rate\\s*:?\\s*([\\d.,]+)",
+      "/month"
+    ],
+    "rate_adjustments": [
+      "as balance",
+      "balance the room charge",
+      "adjusted rate",
+      "remaining balance",
+      "adjustment",
+      "prorated",
+      "pro-rated",
+      "credit",
+      "refund"
     ]
   },
   "skip_keywords": [

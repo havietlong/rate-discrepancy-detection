@@ -113,36 +113,54 @@ class RateParser:
                     return rate, "Flat rate detected"
         return None, None
     
+    def has_rate_adjustment(self, text):
+        """Check if comment mentions any rate adjustment/balance"""
+        for keyword in self.patterns['rate_adjustments']:
+            if re.search(keyword, text, re.IGNORECASE):
+                return True
+        return False
+    
     def parse_rates(self, comment_text, target_date):
         """
         Main function to parse rates from comment text
         """
-        # Skip if contains monthly indicators (monthly guests are always correct)
+        # Skip if contains monthly indicators
         if self.detect_monthly(comment_text):
             return None, "Monthly rate - skipped (assumed correct)", {'monthly': True, 'skip': True}
+        
+        # Check for rate adjustments FIRST
+        has_adjustment = self.has_rate_adjustment(comment_text)
         
         # Priority 1: Date-specific rates
         rate, source, start, end = self.detect_date_specific_rate(comment_text, target_date)
         if rate:
-            return rate, source, {'date_range': {'start': start, 'end': end}}
+            if has_adjustment:
+                source = f"{source} (with rate adjustment)"
+            return rate, source, {'date_range': {'start': start, 'end': end}, 'has_adjustment': has_adjustment}
         
         # Priority 2: NETT rates
         rate, source = self.detect_nett_rate(comment_text)
         if rate:
-            return rate, source, {'type': 'nett'}
+            if has_adjustment:
+                source = f"{source} (with rate adjustment)"
+            return rate, source, {'type': 'nett', 'has_adjustment': has_adjustment}
         
         # Priority 3: ++ rates
         rate, source = self.detect_pp_rate(comment_text)
         if rate:
-            return rate, source, {'type': 'pp'}
+            if has_adjustment:
+                source = f"{source} (with rate adjustment)"
+            return rate, source, {'type': 'pp', 'has_adjustment': has_adjustment}
         
         # Priority 4: Flat rates
         rate, source = self.detect_flat_rate(comment_text)
         if rate:
-            return rate, source, {'type': 'flat'}
+            if has_adjustment:
+                source = f"{source} (with rate adjustment)"
+            return rate, source, {'type': 'flat', 'has_adjustment': has_adjustment}
         
         # No rate found
-        return None, "No rate found", {}
+        return None, "No rate found", {'has_adjustment': has_adjustment}
     
     def get_skip_reason(self, text):
         """Check if comment should be skipped (deposits, discounts, etc.)"""
