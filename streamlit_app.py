@@ -479,41 +479,55 @@ if uploaded_file:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
             # TAB 2: PDF Viewer with Highlighting
+        # TAB 2: PDF Viewer with Highlighting
     with tab2:
         st.subheader("📄 PDF with Room Highlighting")
         
         fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
         
-        # Always show download button (most reliable)
-        st.download_button(
-            label="📥 Download PDF (Recommended)",
-            data=pdf_bytes,
-            file_name="night_audit_report.pdf",
-            mime="application/pdf"
-        )
+        if fix_rooms:
+            st.warning(f"🔍 Rooms to check: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
         
         st.markdown("---")
         
-        if fix_rooms:
-            st.info(f"🔍 Rooms to fix: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+        # Download button as fallback
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            st.download_button(
+                label="📥 Download PDF",
+                data=pdf_bytes,
+                file_name="night_audit_report.pdf",
+                mime="application/pdf"
+            )
         
-        # Use JavaScript Blob URL to bypass sandbox restrictions
+        with col1:
+            st.markdown("**PDF Preview:**")
+        
+        st.markdown("---")
+        
+        # Convert PDF to base64 for the JavaScript Blob
         base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
         
-        html_code = f'''
-        <div id="pdf-container" style="width:100%; height:700px; border:1px solid #ccc; border-radius:5px; overflow:hidden;">
-            <div style="display:flex; justify-content:center; align-items:center; height:100%; flex-direction:column; background:#f5f5f5;">
-                <p>📄 PDF Viewer</p>
-                <button id="viewPdfBtn" style="padding:10px 20px; font-size:16px; cursor:pointer; background:#007bff; color:white; border:none; border-radius:5px;">
-                    Click to Open PDF
-                </button>
-                <p style="margin-top:20px; font-size:12px; color:#666;">(Opens in new tab - works in all browsers)</p>
+        # HTML with JavaScript to create Blob URL and display PDF
+        pdf_viewer_html = f'''
+        <div id="pdf-viewer-wrapper" style="width:100%; height:750px; border:1px solid #ddd; border-radius:8px; overflow:hidden; background:#f0f0f0;">
+            <div id="pdf-loading" style="display:flex; justify-content:center; align-items:center; height:100%; flex-direction:column;">
+                <div style="font-size:24px; margin-bottom:10px;">📄</div>
+                <div>Loading PDF viewer...</div>
+                <div style="font-size:12px; color:#666; margin-top:10px;">Please wait a moment</div>
             </div>
+            <iframe id="pdf-iframe" 
+                    style="width:100%; height:100%; border:none; display:none;"
+                    sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals"
+                    title="PDF Viewer">
+            </iframe>
         </div>
         
         <script>
         (function() {{
             var base64Data = '{base64_pdf}';
+            var loadingDiv = document.getElementById('pdf-loading');
+            var iframe = document.getElementById('pdf-iframe');
             
             function base64ToBlob(base64, mimeType) {{
                 var byteCharacters = atob(base64);
@@ -525,19 +539,39 @@ if uploaded_file:
                 return new Blob([byteArray], {{type: mimeType}});
             }}
             
-            function openPdfInNewTab() {{
-                var blob = base64ToBlob(base64Data, 'application/pdf');
-                var blobUrl = URL.createObjectURL(blob);
-                window.open(blobUrl, '_blank');
-                setTimeout(function() {{ URL.revokeObjectURL(blobUrl); }}, 100);
+            function displayPdfInIframe() {{
+                try {{
+                    var blob = base64ToBlob(base64Data, 'application/pdf');
+                    var blobUrl = URL.createObjectURL(blob);
+                    
+                    iframe.src = blobUrl;
+                    iframe.style.display = 'block';
+                    loadingDiv.style.display = 'none';
+                    
+                    // Clean up blob URL after a delay
+                    setTimeout(function() {{
+                        URL.revokeObjectURL(blobUrl);
+                    }}, 60000);
+                }} catch(e) {{
+                    loadingDiv.innerHTML = '<div style="color:red;">❌ Failed to load PDF. <a href="data:application/pdf;base64,{base64_pdf}">Click here to open</a></div>';
+                    console.error('PDF loading error:', e);
+                }}
             }}
             
-            document.getElementById('viewPdfBtn').onclick = openPdfInNewTab;
+            // Wait for page to be ready
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', displayPdfInIframe);
+            }} else {{
+                displayPdfInIframe();
+            }}
         }})();
         </script>
         '''
         
-        st.components.v1.html(html_code, height=750)
+        st.components.v1.html(pdf_viewer_html, height=800)
+        
+        # Add helpful tip
+        st.caption("💡 Tip: Use Ctrl+F inside the PDF to search for room numbers")
     # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
