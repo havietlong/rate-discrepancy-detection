@@ -478,89 +478,66 @@ if uploaded_file:
             else:
                 st.info("👈 Click on any room from the left panel to see debug information")
     
-        # TAB 2: PDF Viewer with Highlighting
+            # TAB 2: PDF Viewer with Highlighting
     with tab2:
         st.subheader("📄 PDF with Room Highlighting")
         
         fix_rooms = [r for r in all_rooms_data if r['status'] == 'fix']
         
-        # Define base64_pdf ONCE at the start of the tab
+        # Always show download button (most reliable)
+        st.download_button(
+            label="📥 Download PDF (Recommended)",
+            data=pdf_bytes,
+            file_name="night_audit_report.pdf",
+            mime="application/pdf"
+        )
+        
+        st.markdown("---")
+        
+        if fix_rooms:
+            st.info(f"🔍 Rooms to fix: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+        
+        # Use JavaScript Blob URL to bypass sandbox restrictions
         base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
         
-        if highlight_mode == "Visual (red/yellow boxes - slower)":
-            st.warning("⚠️ Visual highlighting mode is SLOWER (30-60 seconds for multi-page PDFs)")
-            
-            # Add download button as fallback
-            st.download_button(
-                label="📥 Download PDF (if viewer doesn't work)",
-                data=pdf_bytes,
-                file_name="night_audit_report.pdf",
-                mime="application/pdf"
-            )
-            
-            st.markdown("---")
-            
-            try:
-                # Try OCR-based highlighting
-                highlighted_images = highlight_with_ocr(pdf_bytes, all_rooms_data, dpi=150)
-                
-                if highlighted_images:
-                    st.success(f"✅ Generated {len(highlighted_images)} pages with highlights")
-                    page_idx = st.number_input("Page", min_value=1, max_value=len(highlighted_images), value=1)
-                    st.image(highlighted_images[page_idx - 1], use_container_width=True)
-                    
-                    st.markdown("""
-                    **Legend:**
-                    - 🔴 **RED BOX** = Room needs rate change
-                    - 🟡 **YELLOW BOX** = Room needs manual check
-                    """)
-                else:
-                    st.error("Highlighting failed. Using fallback mode.")
-                    # Use object tag instead of embed/iframe
-                    st.markdown(f'''
-                        <object data="data:application/pdf;base64,{base64_pdf}" 
-                                type="application/pdf" 
-                                width="100%" 
-                                height="700px">
-                            <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
-                        </object>
-                    ''', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Highlighting error: {str(e)[:100]}")
-                st.info("Using standard PDF viewer")
-                # Use object tag
-                st.markdown(f'''
-                    <object data="data:application/pdf;base64,{base64_pdf}" 
-                            type="application/pdf" 
-                            width="100%" 
-                            height="700px">
-                        <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
-                    </object>
-                ''', unsafe_allow_html=True)
+        html_code = f'''
+        <div id="pdf-container" style="width:100%; height:700px; border:1px solid #ccc; border-radius:5px; overflow:hidden;">
+            <div style="display:flex; justify-content:center; align-items:center; height:100%; flex-direction:column; background:#f5f5f5;">
+                <p>📄 PDF Viewer</p>
+                <button id="viewPdfBtn" style="padding:10px 20px; font-size:16px; cursor:pointer; background:#007bff; color:white; border:none; border-radius:5px;">
+                    Click to Open PDF
+                </button>
+                <p style="margin-top:20px; font-size:12px; color:#666;">(Opens in new tab - works in all browsers)</p>
+            </div>
+        </div>
         
-        else:
-            # Fast mode
-            if fix_rooms:
-                st.info(f"🔍 Press Ctrl+F and search for: {', '.join([str(r['room']) for r in fix_rooms[:10]])}")
+        <script>
+        (function() {{
+            var base64Data = '{base64_pdf}';
             
-            st.download_button(
-                label="📥 Download PDF",
-                data=pdf_bytes,
-                file_name="night_audit_report.pdf",
-                mime="application/pdf"
-            )
+            function base64ToBlob(base64, mimeType) {{
+                var byteCharacters = atob(base64);
+                var byteNumbers = new Array(byteCharacters.length);
+                for (var i = 0; i < byteCharacters.length; i++) {{
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }}
+                var byteArray = new Uint8Array(byteNumbers);
+                return new Blob([byteArray], {{type: mimeType}});
+            }}
             
-            st.markdown("---")
+            function openPdfInNewTab() {{
+                var blob = base64ToBlob(base64Data, 'application/pdf');
+                var blobUrl = URL.createObjectURL(blob);
+                window.open(blobUrl, '_blank');
+                setTimeout(function() {{ URL.revokeObjectURL(blobUrl); }}, 100);
+            }}
             
-            # Use object tag (more reliable than embed or iframe)
-            st.markdown(f'''
-                <object data="data:application/pdf;base64,{base64_pdf}" 
-                        type="application/pdf" 
-                        width="100%" 
-                        height="700px">
-                    <p>PDF cannot be displayed. <a href="data:application/pdf;base64,{base64_pdf}">Click here to download</a></p>
-                </object>
-            ''', unsafe_allow_html=True)
+            document.getElementById('viewPdfBtn').onclick = openPdfInNewTab;
+        }})();
+        </script>
+        '''
+        
+        st.components.v1.html(html_code, height=750)
     # TAB 3: Training Data
     with tab3:
         st.subheader("📊 Training Data Collected")
