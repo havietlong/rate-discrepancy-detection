@@ -412,6 +412,19 @@ if uploaded_file:
                                 'status': 'fix',
                                 'reason': 'Manually flagged as incorrect'
                             }
+                            # Save to training data with FULL details
+                            st.session_state.training_data[room_data['override_key']] = {
+                                'room': room_data['room'],
+                                'guest': room_data['guest'],
+                                'system_rate': room_data['system_rate'],
+                                'comment_rate': room_data['comment_rate'],
+                                'original_decision': room_data['status'],
+                                'corrected_decision': 'fix',
+                                'reason': 'Manually flagged as incorrect',
+                                'timestamp': str(datetime.now()),
+                                'comment_text': room_data['debug_comment_text'][:500],  # First 500 chars
+                                'comment_rate_source': room_data['debug_parse_result'].get('selected_reason', 'N/A')
+                            }
                             st.rerun()
                     
                     with col_override2:
@@ -420,6 +433,18 @@ if uploaded_file:
                                 'status': 'manual_check',
                                 'reason': 'Manually marked for review'
                             }
+                            st.session_state.training_data[room_data['override_key']] = {
+                                'room': room_data['room'],
+                                'guest': room_data['guest'],
+                                'system_rate': room_data['system_rate'],
+                                'comment_rate': room_data['comment_rate'],
+                                'original_decision': room_data['status'],
+                                'corrected_decision': 'manual_check',
+                                'reason': 'Manually marked for review',
+                                'timestamp': str(datetime.now()),
+                                'comment_text': room_data['debug_comment_text'][:500],  # First 500 chars
+                                'comment_rate_source': room_data['debug_parse_result'].get('selected_reason', 'N/A')
+                            }
                             st.rerun()
                     
                     with col_override3:
@@ -427,6 +452,18 @@ if uploaded_file:
                             st.session_state.overrides[room_data['override_key']] = {
                                 'status': 'correct',
                                 'reason': 'Manually verified as correct'
+                            }
+                            st.session_state.training_data[room_data['override_key']] = {
+                                'room': room_data['room'],
+                                'guest': room_data['guest'],
+                                'system_rate': room_data['system_rate'],
+                                'comment_rate': room_data['comment_rate'],
+                                'original_decision': room_data['status'],
+                                'corrected_decision': 'correct',
+                                'reason': 'Manually verified as correct',
+                                'timestamp': str(datetime.now()),
+                                'comment_text': room_data['debug_comment_text'][:500],  # First 500 chars
+                                'comment_rate_source': room_data['debug_parse_result'].get('selected_reason', 'N/A')
                             }
                             st.rerun()
                     
@@ -527,14 +564,162 @@ if uploaded_file:
                 use_container_width=True
             )
     
-    # TAB 3: Training Data
+        # TAB 3: Training Data
     with tab3:
-        st.subheader("📊 Training Data Collected")
+        st.subheader("📊 Training Data Collection")
         
+        st.markdown("""
+        Training data is created when you use **Manual Override** buttons in Tab 1.
+        Each override saves the room, rates, original decision, and your correction.
+        """)
+        
+        # Display training data in an interactive table
         if st.session_state.training_data:
-            st.write(f"Collected {len(st.session_state.training_data)} manual corrections")
-            training_list = list(st.session_state.training_data.values())
-            if training_list:
-                st.json(training_list[-5:])
+            st.success(f"✅ {len(st.session_state.training_data)} training samples collected")
+            
+            # Convert training data to DataFrame for display
+            training_list = []
+            for key, value in st.session_state.training_data.items():
+                training_list.append({
+                    "Room": value.get('room', 'N/A'),
+                    "Guest": value.get('guest', 'N/A')[:25],
+                    "System Rate": f"{value.get('system_rate', 0):,.0f} VND" if value.get('system_rate') else "N/A",
+                    "Comment Rate": f"{value.get('comment_rate', 0):,.0f} VND" if value.get('comment_rate') else "N/A",
+                    "Rate Source": value.get('comment_rate_source', 'N/A')[:40],
+                    "Original": value.get('original_decision', 'N/A'),
+                    "Correction": value.get('corrected_decision', 'N/A'),
+                    "Timestamp": value.get('timestamp', 'N/A')[:16]
+                })
+            
+            df_training = pd.DataFrame(training_list)
+            st.dataframe(df_training, use_container_width=True)
+            
+            # Show full details with comment for each training sample
+            st.markdown("---")
+            st.subheader("📝 Detailed View (with Comments)")
+            
+            # Let user select which training sample to view
+            sample_keys = list(st.session_state.training_data.keys())
+            selected_sample = st.selectbox(
+                "Select a training sample to view details:",
+                options=sample_keys,
+                format_func=lambda x: f"Room {st.session_state.training_data[x].get('room', 'N/A')} - {st.session_state.training_data[x].get('guest', 'N/A')[:30]}"
+            )
+            
+            if selected_sample:
+                sample = st.session_state.training_data[selected_sample]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**🏨 Room:** {sample.get('room', 'N/A')}")
+                    st.markdown(f"**👤 Guest:** {sample.get('guest', 'N/A')}")
+                    st.markdown(f"**💰 System Rate (++):** {sample.get('system_rate', 0):,.0f} VND" if sample.get('system_rate') else "N/A")
+                with col2:
+                    st.markdown(f"**📝 Comment Rate:** {sample.get('comment_rate', 0):,.0f} VND" if sample.get('comment_rate') else "N/A")
+                    st.markdown(f"**🎯 Rate Source:** {sample.get('comment_rate_source', 'N/A')}")
+                    st.markdown(f"**🔄 Correction:** {sample.get('corrected_decision', 'N/A')} → {sample.get('reason', 'N/A')}")
+                
+                # Display the actual comment text
+                st.markdown("---")
+                st.markdown("**📄 Original Comment Text:**")
+                comment_text = sample.get('comment_text', 'No comment text saved')
+                st.code(comment_text, language="text")
+                
+                # Show what the scanner originally thought
+                st.markdown("**🤖 Scanner's Original Decision:**")
+                st.info(f"Status: {sample.get('original_decision', 'N/A')}")
+            
+            # Summary statistics
+            st.markdown("---")
+            st.subheader("📈 Correction Summary")
+            
+            col1, col2, col3 = st.columns(3)
+            fixed_corrections = [t for t in training_list if t['Correction'] == 'fix']
+            manual_corrections = [t for t in training_list if t['Correction'] == 'manual_check']
+            correct_corrections = [t for t in training_list if t['Correction'] == 'correct']
+            
+            with col1:
+                st.metric("Marked as NEED FIX", len(fixed_corrections))
+            with col2:
+                st.metric("Marked as MANUAL CHECK", len(manual_corrections))
+            with col3:
+                st.metric("Marked as CORRECT", len(correct_corrections))
+            
+            # Export buttons
+            st.markdown("---")
+            st.subheader("💾 Export Training Data")
+            
+            col_export1, col_export2 = st.columns(2)
+            
+            with col_export1:
+                # Export as CSV
+                csv_data = df_training.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Summary as CSV",
+                    data=csv_data,
+                    file_name=f"training_data_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            
+            with col_export2:
+                # Export FULL data (including comments) as JSON
+                full_export = []
+                for key, value in st.session_state.training_data.items():
+                    full_export.append({
+                        'room': value.get('room'),
+                        'guest': value.get('guest'),
+                        'system_rate': value.get('system_rate'),
+                        'comment_rate': value.get('comment_rate'),
+                        'original_decision': value.get('original_decision'),
+                        'corrected_decision': value.get('corrected_decision'),
+                        'reason': value.get('reason'),
+                        'comment_text': value.get('comment_text'),
+                        'comment_rate_source': value.get('comment_rate_source'),
+                        'timestamp': value.get('timestamp')
+                    })
+                
+                json_data = json.dumps(full_export, indent=2, default=str)
+                st.download_button(
+                    label="📥 Download Full Data (JSON with comments)",
+                    data=json_data,
+                    file_name=f"training_data_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            # Clear training data button (with confirmation)
+            st.markdown("---")
+            col_clear1, col_clear2 = st.columns([1, 4])
+            with col_clear1:
+                if st.button("🗑️ Clear All", type="secondary"):
+                    st.session_state.training_data = {}
+                    st.rerun()
+        
         else:
-            st.info("No training data yet. Use manual override buttons in Tab 1 to build your training set.")
+            st.info("📭 No training data yet. Go to Tab 1, click on a room, and use the Manual Override buttons to build your training set.")
+            
+            # Show example of what training data looks like
+            with st.expander("ℹ️ How training data works"):
+                st.markdown("""
+                **When you click a Manual Override button, the following is saved:**
+                
+                | Field | Description |
+                |-------|-------------|
+                | Room | Room number |
+                | Guest | Guest name |
+                | System Rate | Rate from system (++) |
+                | Comment Rate | Rate extracted from comment |
+                | Rate Source | How the scanner found the rate (date-specific/flat/NETT/++) |
+                | Original Decision | What the scanner thought (fix/manual_check/correct) |
+                | Your Correction | What you marked it as |
+                | Reason | Why you changed it |
+                | Comment Text | The actual comment text (first 500 chars) |
+                | Timestamp | When you made the correction |
+                
+                **Use this data to:**
+                - Train a future ML model
+                - Identify patterns where the scanner makes mistakes
+                - Improve regex patterns in `rate_patterns.json`
+                - Understand why certain rates were misclassified
+                """)
