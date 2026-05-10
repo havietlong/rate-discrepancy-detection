@@ -30,70 +30,26 @@ def is_valid_room(room_num):
 
 def clean_guest_name(name):
     """
-    Remove company names, OTAs, and other noise from guest names
-    Handles: T- (OTA Travel), C- (Corporate), S- (Self/System), B- (B2B)
-    Also removes common company suffixes like PTE. LTD, Connectivity, etc.
+    Clean guest name by removing asterisks, extra spaces, and OTA prefixes
     """
     if not name:
         return name
     
-    # First, split the name if it contains company indicator (T-, C-, S-, B-)
-    # Example: "Tsai CHIN LIANG,Albert Connectivity" -> split before "Connectivity"
+    # Remove leading/trailing asterisks
+    name = name.lstrip('*').rstrip('*')
     
-    # Remove any OTA prefix from the beginning (T-, C-, S-, B-)
+    # Remove OTA prefixes (T-, C-, S-, B-)
     name = re.sub(r'^[TCSB]-\s*', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\s+[TCSB]-\s*', ' ', name, flags=re.IGNORECASE)
     
-    # Remove common company/OTA suffixes (case insensitive)
-    company_suffixes = [
-        r'\s+Connectivity$',
-        r'\s+PTE\.?\s*LTD\.?$',
-        r'\s+PTE$',
-        r'\s+LTD\.?$',
-        r'\s+COMPANY\s+PTE\.?$',
-        r'\s+COMPANY$',
-        r'\s+COMPUTER\s+LTD\.?$',
-        r'\s+COMPUTER$',
-        r'\s+I&S$',
-        r'\s+Tour$',
-        r'\s+Golf$',
-        r'\s+Travel$',
-        r'\s+Technologies$',
-        r'\s+Services$',
-        r'\s+Logistics$',
-        r'\s+International$',
-        r'\s+Corporation$',
-        r'\s+Corp$',
-        r'\s+Inc\.?$',
-        r'\s+Group$',
-        r'\s+Holding$',
-        r'\s+Solutions$',
-        r'\s+Limited$',
-        r'\s+Co\.?$',
-        r'\s+Co$',
-        r'\s+Reservation$',
-        r'\s+Reservations$',
-        r'\s+HOTELBEDS$',
-        r'\s+AGODA$',
-        r'\s+EXPEDIA$',
-        r'\s+BOOKING$',
-        r'\s+CTRIP$',
-        r'\s+TRAVELOCITY$',
-    ]
-    
-    for pattern in company_suffixes:
-        name = re.sub(pattern, '', name, flags=re.IGNORECASE)
-    
-    # Remove any remaining OTA/company indicator anywhere in the string
-    name = re.sub(r'\s+[TCSB]-\s*\S+\s*', ' ', name, flags=re.IGNORECASE)
+    # Remove any trailing numbers (like confirmation numbers)
+    name = re.sub(r'\s+\d+$', '', name)
     
     # Clean up extra spaces
     name = re.sub(r'\s+', ' ', name)
     name = name.strip()
     
-    # Remove trailing special characters
-    name = name.rstrip(',.- ')
-    name = name.lstrip('*')
+    # Remove quotes
+    name = name.replace('"', '')
     
     return name
 
@@ -138,13 +94,21 @@ def extract_guests_from_night_audit(text):
 
 def extract_guests_from_arrivals_report(text):
     """
-    Extract guests from Arrivals Report format
-    Handles:
-    - Asterisks before names (*Chi-Hsi,Ou)
-    - Multi-row entries (name, dates, room type on separate lines)
-    - Company names on separate lines
+    Extract guests from Arrivals Report format using text-based extraction
+    NO LONGER removes duplicate room+date combinations (different guests can share)
     """
     guests = []
+    
+    # Debug counters
+    debug_stats = {
+        'total_lines_scanned': 0,
+        'lines_with_room_numbers': 0,
+        'invalid_rooms_filtered': 0,
+        'invalid_room_numbers': [],
+        'no_name_extracted': 0,
+        'name_too_short': 0,
+        'successfully_added': 0
+    }
     
     lines = text.split('\n')
     total_lines = len(lines)
@@ -152,140 +116,189 @@ def extract_guests_from_arrivals_report(text):
     i = 0
     while i < total_lines:
         line = lines[i].strip()
+        debug_stats['total_lines_scanned'] += 1
         
         # Look for a line that starts with a room number (3-4 digits)
-        # Allow optional asterisk after the room number
-        room_match = re.match(r'^(\d{3,4})\s+[\*\s]*(.+?)(?:\s+\d+)?$', line)
+        room_match = re.match(r'^(\d{3,4})\s+', line)
         
         if room_match:
             room_num = room_match.group(1)
             room_str = room_num.zfill(4)
+            debug_stats['lines_with_room_numbers'] += 1
             
             # Skip invalid rooms
             if not is_valid_room(room_str):
+                debug_stats['invalid_rooms_filtered'] += 1
+                if room_str not in debug_stats['invalid_room_numbers']:
+                    debug_stats['invalid_room_numbers'].append(room_str)
                 i += 1
                 continue
             
-            # Get the name part (remove asterisks and clean)
-            name_part_raw = room_match.group(2).strip()
-            # Remove leading asterisks
-            name_part_raw = name_part_raw.lstrip('*')
-            # Remove trailing numbers (like conf numbers)
-            name_part_raw = re.sub(r'\s+\d+$', '', name_part_raw)
+            # Get the part after the room number
+            remaining = line[len(room_match.group(0)):].strip()
             
-            # Initialize tracking variables
             arrival_date = None
             departure_date = None
-            guest_name = name_part_raw if name_part_raw else None
+            name_part = remaining
             
-            # Check next few lines for dates and additional name parts
-            date_pattern = r'(\d{2}/\d{2}/\d{2})'
+            # Look for company indicators (C-, T-, S-)
+            company_pattern = r'\s+[CTS]-\s*'
+            company_match = re.search(company_pattern, remaining, re.IGNORECASE)
             
-            # Look ahead up to 5 lines to find dates
-            for offset in range(1, 6):
-                if i + offset < total_lines:
-                    next_line = lines[i + offset].strip()
-                    
-                    # Look for dates in this line
-                    dates = re.findall(date_pattern, next_line)
-                    
-                    if len(dates) >= 2:
-                        arrival_date = dates[0]
-                        departure_date = dates[1]
-                        # If we found dates, we can stop looking
-                        break
-                    elif len(dates) == 1:
-                        if arrival_date is None:
-                            arrival_date = dates[0]
-                        elif departure_date is None:
-                            departure_date = dates[0]
-                    
-                    # Also check if this line might contain additional name parts
-                    # (like company names that got split)
-                    if not guest_name or guest_name == name_part_raw:
-                        # If line contains letters and no dates, might be part of name
-                        if re.match(r'^[A-Za-z]', next_line) and not re.search(date_pattern, next_line):
-                            # Don't include "C-" or "T-" prefixes as name
-                            if not re.match(r'^[CT]-', next_line):
-                                # Append to name if it looks like a name continuation
-                                if len(next_line) < 50 and not re.match(r'^\d', next_line):
-                                    if guest_name:
-                                        guest_name = f"{guest_name} {next_line}"
-                                    else:
-                                        guest_name = next_line
-                                    i += 1  # Skip this line since we used it
-            
-            # Clean up the guest name
-            if guest_name:
-                # Remove company prefixes
-                guest_name = re.sub(r'\s+[CT]-\s*\S+', '', guest_name)
-                # Remove quotes
-                guest_name = guest_name.replace('"', '')
-                # Clean up extra spaces
-                guest_name = re.sub(r'\s+', ' ', guest_name)
-                guest_name = guest_name.strip()
-                
-                # Remove any remaining numbers or special chars at end
-                guest_name = re.sub(r'\s+\d+$', '', guest_name)
+            if company_match:
+                # Name is everything BEFORE the company indicator
+                name_part = remaining[:company_match.start()].strip()
+                # Look for dates after company indicator
+                remaining_after = remaining[company_match.end():].strip()
+                date_pattern = r'(\d{2}/\d{2}/\d{2})'
+                dates = re.findall(date_pattern, remaining_after)
+                if len(dates) >= 2:
+                    arrival_date = dates[0]
+                    departure_date = dates[1]
+                else:
+                    # Check next lines
+                    for offset in range(1, 4):
+                        if i + offset < total_lines:
+                            next_line = lines[i + offset].strip()
+                            dates = re.findall(date_pattern, next_line)
+                            if len(dates) >= 2:
+                                arrival_date = dates[0]
+                                departure_date = dates[1]
+                                break
+                            elif len(dates) == 1:
+                                if arrival_date is None:
+                                    arrival_date = dates[0]
+                                elif departure_date is None:
+                                    departure_date = dates[0]
             else:
-                guest_name = f"Guest_{room_str}"
+                # No company indicator, look for dates directly
+                date_pattern = r'(\d{2}/\d{2}/\d{2})'
+                date_match = re.search(date_pattern, remaining)
+                
+                if date_match:
+                    name_part = remaining[:date_match.start()].strip()
+                    dates = re.findall(date_pattern, remaining)
+                    arrival_date = dates[0] if len(dates) > 0 else None
+                    departure_date = dates[1] if len(dates) > 1 else None
+                else:
+                    # No dates on this line, check next lines
+                    for offset in range(1, 4):
+                        if i + offset < total_lines:
+                            next_line = lines[i + offset].strip()
+                            dates = re.findall(date_pattern, next_line)
+                            if len(dates) >= 2:
+                                arrival_date = dates[0]
+                                departure_date = dates[1]
+                                break
+                            elif len(dates) == 1:
+                                if arrival_date is None:
+                                    arrival_date = dates[0]
+                                elif departure_date is None:
+                                    departure_date = dates[0]
             
-            # Only add if we have a good name or dates
-            if guest_name and guest_name != f"Guest_{room_str}":
+            # Clean up the name
+            guest_name = name_part.strip()
+            guest_name = guest_name.lstrip('*')
+            guest_name = re.sub(r'\s+\d+$', '', guest_name)
+            guest_name = re.sub(r'\s+', ' ', guest_name)
+            guest_name = re.sub(r'\s+[CTS]-\s*\S+', '', guest_name, flags=re.IGNORECASE)
+            
+            # Check if we have a valid name
+            if not guest_name or len(guest_name) < 3:
+                debug_stats['no_name_extracted'] += 1
+                # Still try to add with fallback name if we have dates
+                if arrival_date:
+                    guests.append({
+                        'room': room_str,
+                        'guest_name': f"Guest_{room_str}",
+                        'arrival_date': arrival_date,
+                        'departure_date': departure_date,
+                        'source': 'Arrivals Report (Text)',
+                        'original_text': name_part[:50]
+                    })
+                    debug_stats['successfully_added'] += 1
+                else:
+                    debug_stats['name_too_short'] += 1
+            else:
                 guests.append({
                     'room': room_str,
                     'guest_name': guest_name[:60],
                     'arrival_date': arrival_date,
                     'departure_date': departure_date,
-                    'source': 'Arrivals Report'
+                    'source': 'Arrivals Report (Text)',
+                    'original_text': name_part[:50]
                 })
-            elif arrival_date:  # Even without a good name, add if we have dates
-                guests.append({
-                    'room': room_str,
-                    'guest_name': f"Guest_{room_str}",
-                    'arrival_date': arrival_date,
-                    'departure_date': departure_date,
-                    'source': 'Arrivals Report'
-                })
+                debug_stats['successfully_added'] += 1
         
         i += 1
     
-    # Remove duplicates based on room + arrival date + guest name
-    seen = set()
-    unique_guests = []
+    # Display debug statistics
+    st.write("---")
+    st.write("### 📊 Extraction Debug Statistics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Lines Scanned", debug_stats['total_lines_scanned'])
+    with col2:
+        st.metric("Lines with Room #", debug_stats['lines_with_room_numbers'])
+    with col3:
+        st.metric("Invalid Rooms Filtered", debug_stats['invalid_rooms_filtered'])
+    with col4:
+        st.metric("Successfully Added", debug_stats['successfully_added'])
     
-    for guest in guests:
-        arrival = guest.get('arrival_date', 'unknown')
-        name = guest.get('guest_name', '')
-        key = f"{guest['room']}_{arrival}_{name}"
-        
-        if key not in seen:
-            seen.add(key)
-            unique_guests.append(guest)
+    if debug_stats['invalid_room_numbers']:
+        with st.expander(f"🚫 Invalid Room Numbers ({len(debug_stats['invalid_room_numbers'])})"):
+            st.write("These room numbers were filtered out (floor must be 04-16, position 01-12):")
+            st.write(", ".join(debug_stats['invalid_room_numbers'][:30]))
+            if len(debug_stats['invalid_room_numbers']) > 30:
+                st.write(f"... and {len(debug_stats['invalid_room_numbers']) - 30} more")
     
-    return unique_guests
+    # NO DEDUPLICATION - keep all records
+    st.write(f"📊 Total guests extracted: {len(guests)}")
+    st.write("---")
+    
+    return guests
 
 
 def extract_guests_from_pdf_table(pdf_bytes):
     """
     Extract guests using pdfplumber's table extraction
-    Handles OTA/Company prefixes: T-, C-, S-, B-
+    NO LONGER removes duplicate room+date combinations
     """
     guests = []
     
+    debug_stats = {
+        'pages_processed': 0,
+        'tables_found': 0,
+        'rows_processed': 0,
+        'valid_rooms_found': 0,
+        'invalid_rooms_filtered': 0,
+        'no_name_extracted': 0,
+        'dates_found': 0,
+        'invalid_room_numbers': []
+    }
+    
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         for page_num, page in enumerate(pdf.pages):
+            debug_stats['pages_processed'] += 1
             tables = page.extract_tables()
+            
+            if not tables:
+                tables = page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines"
+                })
+            
+            debug_stats['tables_found'] += len(tables)
             
             for table in tables:
                 for row in table:
-                    if not row or len(row) < 3:
+                    if not row or len(row) < 2:
                         continue
                     
-                    # Look for room number in first column (col 0)
-                    room_cell = str(row[0]).strip() if row[0] else ""
+                    debug_stats['rows_processed'] += 1
                     
-                    # Room number should be 3-4 digits (allow asterisks)
+                    # Column 0: Room number
+                    room_cell = str(row[0]).strip() if row[0] else ""
                     room_match = re.match(r'^[\*\s]*(\d{3,4})[\*\s]*$', room_cell)
                     
                     if room_match:
@@ -293,46 +306,40 @@ def extract_guests_from_pdf_table(pdf_bytes):
                         room_str = room_num.zfill(4)
                         
                         if not is_valid_room(room_str):
+                            debug_stats['invalid_rooms_filtered'] += 1
+                            if room_str not in debug_stats['invalid_room_numbers']:
+                                debug_stats['invalid_room_numbers'].append(room_str)
                             continue
                         
-                        # Name is in column 1 (col index 1)
+                        debug_stats['valid_rooms_found'] += 1
+                        
+                        # Column 1: Guest Name
                         name_cell = str(row[1]).strip() if len(row) > 1 else ""
-                        # Remove leading asterisks
                         guest_name = name_cell.lstrip('*').strip()
+                        guest_name = re.sub(r'\s+', ' ', guest_name)
                         
-                        # Clean the name using the cleaning function
-                        guest_name = clean_guest_name(guest_name)
-                        
-                        # If name is still empty, try column 0 (room col sometimes has name)
-                        if not guest_name or len(guest_name) < 3:
-                            # Check if room column has additional text
-                            room_parts = room_cell.split()
-                            if len(room_parts) > 1:
-                                potential_name = ' '.join(room_parts[1:])
-                                guest_name = clean_guest_name(potential_name)
-                        
-                        # Dates: Arrival usually in column 3, Departure in column 4
+                        # Extract dates
                         arrival_date = None
                         departure_date = None
-                        
                         date_pattern = r'(\d{2}/\d{2}/\d{2})'
                         
-                        # Search through all columns for dates
                         for col_idx, cell in enumerate(row):
-                            if cell:
+                            if cell and col_idx >= 3:
                                 cell_str = str(cell).strip()
                                 dates = re.findall(date_pattern, cell_str)
                                 if len(dates) >= 2:
                                     arrival_date = dates[0]
                                     departure_date = dates[1]
+                                    debug_stats['dates_found'] += 1
                                     break
                                 elif len(dates) == 1:
                                     if arrival_date is None:
                                         arrival_date = dates[0]
                                     elif departure_date is None:
                                         departure_date = dates[0]
+                                        debug_stats['dates_found'] += 1
                         
-                        # Only add if we have a valid name
+                        # Add to guests (keep ALL records, even same room+date)
                         if guest_name and len(guest_name) > 2:
                             guests.append({
                                 'room': room_str,
@@ -341,29 +348,43 @@ def extract_guests_from_pdf_table(pdf_bytes):
                                 'departure_date': departure_date,
                                 'source': f'Page {page_num + 1}'
                             })
-                        elif arrival_date:  # Fallback
-                            guests.append({
-                                'room': room_str,
-                                'guest_name': f"Guest_{room_str}",
-                                'arrival_date': arrival_date,
-                                'departure_date': departure_date,
-                                'source': f'Page {page_num + 1}'
-                            })
+                        else:
+                            debug_stats['no_name_extracted'] += 1
+                            if arrival_date:
+                                guests.append({
+                                    'room': room_str,
+                                    'guest_name': f"Guest_{room_str}",
+                                    'arrival_date': arrival_date,
+                                    'departure_date': departure_date,
+                                    'source': f'Page {page_num + 1}'
+                                })
     
-    # Remove duplicates based on room + arrival date + guest name
-    seen = set()
-    unique_guests = []
+    # Display debug statistics
+    st.write("---")
+    st.write("### 📊 Table Extraction Debug Statistics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Pages Processed", debug_stats['pages_processed'])
+    with col2:
+        st.metric("Tables Found", debug_stats['tables_found'])
+    with col3:
+        st.metric("Rows Processed", debug_stats['rows_processed'])
+    with col4:
+        st.metric("Valid Rooms Found", debug_stats['valid_rooms_found'])
     
-    for guest in guests:
-        arrival = guest.get('arrival_date', 'unknown')
-        name = guest.get('guest_name', '')
-        key = f"{guest['room']}_{arrival}_{name}"
-        
-        if key not in seen:
-            seen.add(key)
-            unique_guests.append(guest)
+    st.write(f"🚫 Invalid rooms filtered: {debug_stats['invalid_rooms_filtered']}")
+    st.write(f"❌ No name extracted: {debug_stats['no_name_extracted']}")
+    st.write(f"✅ Dates found: {debug_stats['dates_found']}")
     
-    return unique_guests
+    if debug_stats['invalid_room_numbers']:
+        with st.expander(f"🚫 Invalid Room Numbers ({len(debug_stats['invalid_room_numbers'])})"):
+            st.write(", ".join(debug_stats['invalid_room_numbers'][:30]))
+    
+    # NO DEDUPLICATION - keep all records
+    st.write(f"📊 Total guests extracted: {len(guests)}")
+    st.write("---")
+    
+    return guests
 
 
 def extract_guests_from_pdf(pdf_bytes):

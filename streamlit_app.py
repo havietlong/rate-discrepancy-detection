@@ -249,7 +249,7 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")
     
     st.divider()
-    st.caption("v2.0 - Hotel Operations Tool")
+    st.caption("v2.5 - Hotel Operations Tool")
 
 # ========== MAIN APP ==========
 
