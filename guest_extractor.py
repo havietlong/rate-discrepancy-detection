@@ -95,7 +95,7 @@ def extract_guests_from_night_audit(text):
 def extract_guests_from_arrivals_report(text):
     """
     Extract guests from Arrivals Report format using text-based extraction
-    NO LONGER removes duplicate room+date combinations (different guests can share)
+    Keeps all records, shows modal for TRUE duplicates
     """
     guests = []
     
@@ -232,6 +232,20 @@ def extract_guests_from_arrivals_report(text):
         
         i += 1
     
+    # ========== FIND TRUE DUPLICATES ==========
+    duplicate_map = {}
+    for guest in guests:
+        room = guest['room']
+        name = guest['guest_name'].lower().strip()
+        arrival = guest.get('arrival_date', 'unknown')
+        key = f"{room}_{name}_{arrival}"
+        
+        if key not in duplicate_map:
+            duplicate_map[key] = []
+        duplicate_map[key].append(guest)
+    
+    true_duplicates = {k: v for k, v in duplicate_map.items() if len(v) > 1}
+    
     # Display debug statistics
     st.write("---")
     st.write("### 📊 Extraction Debug Statistics")
@@ -252,7 +266,36 @@ def extract_guests_from_arrivals_report(text):
             if len(debug_stats['invalid_room_numbers']) > 30:
                 st.write(f"... and {len(debug_stats['invalid_room_numbers']) - 30} more")
     
-    # NO DEDUPLICATION - keep all records
+    # Show TRUE duplicates modal
+    if true_duplicates:
+        st.warning(f"🔄 Found {len(true_duplicates)} TRUE duplicate(s) (exact same guest, room, and arrival date)")
+        
+        if st.button(f"📋 Show {len(true_duplicates)} Duplicate Record(s)", type="primary"):
+            st.markdown("---")
+            st.subheader("📋 True Duplicate Records")
+            st.markdown("These records have the **exact same guest name + room + arrival date** appearing multiple times:")
+            
+            for key, duplicates in true_duplicates.items():
+                parts = key.split('_', 2)
+                room_num = parts[0] if len(parts) > 0 else "Unknown"
+                guest_name = parts[1] if len(parts) > 1 else "Unknown"
+                arrival_date = parts[2] if len(parts) > 2 else "Unknown"
+                
+                with st.expander(f"🔁 Room {room_num} - {guest_name[:40]} - Arrival {arrival_date} ({len(duplicates)} copies)", expanded=False):
+                    dup_data = []
+                    for idx, dup in enumerate(duplicates):
+                        dup_data.append({
+                            "Occurrence": f"Copy {idx + 1}",
+                            "Guest Name": dup.get('guest_name', 'N/A')[:50],
+                            "Arrival": dup.get('arrival_date', 'N/A'),
+                            "Departure": dup.get('departure_date', 'N/A'),
+                            "Source": dup.get('source', 'N/A')
+                        })
+                    st.dataframe(pd.DataFrame(dup_data), use_container_width=True)
+                st.markdown("")
+    else:
+        st.success("✅ No true duplicate records found (all guests are unique)")
+    
     st.write(f"📊 Total guests extracted: {len(guests)}")
     st.write("---")
     
@@ -262,7 +305,8 @@ def extract_guests_from_arrivals_report(text):
 def extract_guests_from_pdf_table(pdf_bytes):
     """
     Extract guests using pdfplumber's table extraction
-    NO LONGER removes duplicate room+date combinations
+    Keeps all records, but shows a modal for TRUE duplicates
+    (exact same guest name + room + arrival date)
     """
     guests = []
     
@@ -339,7 +383,7 @@ def extract_guests_from_pdf_table(pdf_bytes):
                                         departure_date = dates[0]
                                         debug_stats['dates_found'] += 1
                         
-                        # Add to guests (keep ALL records, even same room+date)
+                        # Add to guests (keep ALL records)
                         if guest_name and len(guest_name) > 2:
                             guests.append({
                                 'room': room_str,
@@ -358,6 +402,22 @@ def extract_guests_from_pdf_table(pdf_bytes):
                                     'departure_date': departure_date,
                                     'source': f'Page {page_num + 1}'
                                 })
+    
+    # ========== FIND TRUE DUPLICATES (exact same name + room + arrival date) ==========
+    duplicate_map = {}
+    for guest in guests:
+        # Create a key from normalized values
+        room = guest['room']
+        name = guest['guest_name'].lower().strip()
+        arrival = guest.get('arrival_date', 'unknown')
+        key = f"{room}_{name}_{arrival}"
+        
+        if key not in duplicate_map:
+            duplicate_map[key] = []
+        duplicate_map[key].append(guest)
+    
+    # Filter to only actual duplicates (more than 1 occurrence)
+    true_duplicates = {k: v for k, v in duplicate_map.items() if len(v) > 1}
     
     # Display debug statistics
     st.write("---")
@@ -380,7 +440,37 @@ def extract_guests_from_pdf_table(pdf_bytes):
         with st.expander(f"🚫 Invalid Room Numbers ({len(debug_stats['invalid_room_numbers'])})"):
             st.write(", ".join(debug_stats['invalid_room_numbers'][:30]))
     
-    # NO DEDUPLICATION - keep all records
+    # Show TRUE duplicates modal button
+    if true_duplicates:
+        st.warning(f"🔄 Found {len(true_duplicates)} TRUE duplicate(s) (exact same guest, room, and arrival date)")
+        
+        if st.button(f"📋 Show {len(true_duplicates)} Duplicate Record(s)", type="primary"):
+            st.markdown("---")
+            st.subheader("📋 True Duplicate Records")
+            st.markdown("These records have the **exact same guest name + room + arrival date** appearing multiple times:")
+            
+            for key, duplicates in true_duplicates.items():
+                # Parse key for display
+                parts = key.split('_', 2)
+                room_num = parts[0] if len(parts) > 0 else "Unknown"
+                guest_name = parts[1] if len(parts) > 1 else "Unknown"
+                arrival_date = parts[2] if len(parts) > 2 else "Unknown"
+                
+                with st.expander(f"🔁 Room {room_num} - {guest_name[:40]} - Arrival {arrival_date} ({len(duplicates)} copies)", expanded=False):
+                    dup_data = []
+                    for idx, dup in enumerate(duplicates):
+                        dup_data.append({
+                            "Occurrence": f"Copy {idx + 1}",
+                            "Guest Name": dup.get('guest_name', 'N/A')[:50],
+                            "Arrival": dup.get('arrival_date', 'N/A'),
+                            "Departure": dup.get('departure_date', 'N/A'),
+                            "Source": dup.get('source', 'N/A')
+                        })
+                    st.dataframe(pd.DataFrame(dup_data), use_container_width=True)
+                st.markdown("")
+    else:
+        st.success("✅ No true duplicate records found (all guests are unique)")
+    
     st.write(f"📊 Total guests extracted: {len(guests)}")
     st.write("---")
     
