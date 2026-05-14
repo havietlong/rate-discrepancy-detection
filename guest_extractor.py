@@ -603,252 +603,282 @@ def detect_pdf_format(pdf_bytes):
             return "Unknown"
 
 
+def extract_guests_from_arrivals_report_silent(text):
+    """
+    Silent version - no debug output, just returns guests
+    """
+    guests = []
+    lines = text.split('\n')
+    total_lines = len(lines)
+    
+    i = 0
+    while i < total_lines:
+        line = lines[i].strip()
+        room_match = re.match(r'^(\d{3,4})\s+', line)
+        
+        if room_match:
+            room_num = room_match.group(1)
+            room_str = room_num.zfill(4)
+            
+            if not is_valid_room(room_str):
+                i += 1
+                continue
+            
+            remaining = line[len(room_match.group(0)):].strip()
+            
+            arrival_date = None
+            departure_date = None
+            name_part = remaining
+            
+            company_pattern = r'\s+[CTS]-\s*'
+            company_match = re.search(company_pattern, remaining, re.IGNORECASE)
+            date_pattern = r'(\d{2}/\d{2}/\d{2})'
+            
+            if company_match:
+                name_part = remaining[:company_match.start()].strip()
+                remaining_after = remaining[company_match.end():].strip()
+                dates = re.findall(date_pattern, remaining_after)
+                if len(dates) >= 2:
+                    arrival_date = dates[0]
+                    departure_date = dates[1]
+                else:
+                    for offset in range(1, 4):
+                        if i + offset < total_lines:
+                            next_line = lines[i + offset].strip()
+                            dates = re.findall(date_pattern, next_line)
+                            if len(dates) >= 2:
+                                arrival_date = dates[0]
+                                departure_date = dates[1]
+                                break
+                            elif len(dates) == 1:
+                                if arrival_date is None:
+                                    arrival_date = dates[0]
+                                elif departure_date is None:
+                                    departure_date = dates[0]
+            else:
+                date_match = re.search(date_pattern, remaining)
+                if date_match:
+                    name_part = remaining[:date_match.start()].strip()
+                    dates = re.findall(date_pattern, remaining)
+                    arrival_date = dates[0] if len(dates) > 0 else None
+                    departure_date = dates[1] if len(dates) > 1 else None
+                else:
+                    for offset in range(1, 4):
+                        if i + offset < total_lines:
+                            next_line = lines[i + offset].strip()
+                            dates = re.findall(date_pattern, next_line)
+                            if len(dates) >= 2:
+                                arrival_date = dates[0]
+                                departure_date = dates[1]
+                                break
+                            elif len(dates) == 1:
+                                if arrival_date is None:
+                                    arrival_date = dates[0]
+                                elif departure_date is None:
+                                    departure_date = dates[0]
+            
+            guest_name = name_part.strip()
+            guest_name = guest_name.lstrip('*')
+            guest_name = re.sub(r'\s+\d+$', '', guest_name)
+            guest_name = re.sub(r'\s+', ' ', guest_name)
+            guest_name = re.sub(r'\s+[CTS]-\s*\S+', '', guest_name, flags=re.IGNORECASE)
+            
+            if not guest_name or len(guest_name) < 3:
+                if arrival_date:
+                    guests.append({
+                        'room': room_str,
+                        'guest_name': f"Guest_{room_str}",
+                        'arrival_date': arrival_date,
+                        'departure_date': departure_date,
+                        'source': 'Arrivals Report'
+                    })
+            else:
+                guests.append({
+                    'room': room_str,
+                    'guest_name': guest_name[:60],
+                    'arrival_date': arrival_date,
+                    'departure_date': departure_date,
+                    'source': 'Arrivals Report'
+                })
+        
+        i += 1
+    
+    return guests
+
 def display_guest_extractor(pdf_bytes):
     """
-    Main function for Guest Extractor mode with batch selection and Migadu API integration
+    Main function for Guest Extractor - CLEAN VERSION with working duplicate display
     """
     st.subheader("📇 Guest Name Extractor")
     
-    # Detect format
-    format_type = detect_pdf_format(pdf_bytes)
-    st.info(f"📄 Detected PDF format: **{format_type}**")
+    # Get page count first
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total_pages = len(pdf.pages)
     
-    with st.spinner("Extracting guest names from PDF..."):
-        guests = extract_guests_from_pdf(pdf_bytes)
+    # Show simple status
+    st.info(f"📄 PDF: {total_pages} pages | Format: Arrivals Report")
+    
+    # Cache extraction (use silent text extraction - the working one)
+    cache_key = f"extracted_guests_{hash(pdf_bytes)}"
+    if cache_key not in st.session_state:
+        with st.spinner(f"Extracting guests from {total_pages} pages..."):
+            with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+                full_text = ""
+                for page in pdf.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        full_text += extracted + "\n"
+            
+            # Use SILENT version (no debug output)
+            guests = extract_guests_from_arrivals_report_silent(full_text)
+            st.session_state[cache_key] = guests
+            st.session_state['total_pages'] = total_pages
+    
+    guests = st.session_state[cache_key]
     
     if not guests:
-        st.warning("No guests found in PDF. Please check the file format.")
-        st.markdown("""
-        **Supported formats:**
-        - Night Audit report (with Rate Amt. column)
-        - Arrivals report (with Arr. Date/Dep. Date)
-        """)
+        st.warning("No guests found. Please check the PDF format.")
         return
     
-    st.success(f"✅ Found {len(guests)} guests")
+    st.success(f"✅ {len(guests)} guests extracted")
     
-    # ========== DOMAIN MANAGEMENT SECTION ==========
-    st.markdown("---")
-    st.subheader("🌐 Domain & API Settings")
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs(["📋 Guest List", "📦 Batch Export", "⚙️ Settings"])
     
-    col_domain1, col_domain2, col_domain3 = st.columns([2, 1, 1])
+    # ========== TAB 1: Guest List ==========
+    with tab1:
+        # Prepare data for display
+        guest_data = []
+        for idx, guest in enumerate(guests):
+            guest_data.append({
+                "#": idx + 1,
+                "Room": guest['room'],
+                "Guest Name": guest['guest_name'][:50],
+                "Arrival": guest.get('arrival_date', 'N/A'),
+                "Departure": guest.get('departure_date', 'N/A'),
+                "Source": guest.get('source', 'N/A')
+            })
+        
+        df_guests = pd.DataFrame(guest_data)
+        st.dataframe(df_guests, use_container_width=True, height=500)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("📥 CSV", df_guests.to_csv(index=False), f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+        with col2:
+            st.download_button("📥 JSON", df_guests.to_json(orient='records', indent=2), f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "application/json")
     
-    with col_domain1:
-        # Domain input
-        domain = st.text_input(
-            "Email Domain", 
-            value=st.session_state.get('email_domain', 'guest.stay.com'),
-            help="Domain to use for email addresses (e.g., guest.stay.com)"
-        )
-        st.session_state.email_domain = domain
+    # ========== TAB 2: Batch Export ==========
+    with tab2:
+        st.subheader("Batch Email Generation")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            batch_size = st.number_input("Records", 1, len(guests), min(50, len(guests)), 10)
+        with col2:
+            start_from = st.number_input("Start from", 1, len(guests), 1, 1)
+        
+        end_idx = min(start_from + batch_size - 1, len(guests))
+        st.info(f"Records #{start_from} to #{end_idx} ({batch_size} records)")
+        
+        # Preview
+        preview = []
+        for idx in range(start_from - 1, end_idx):
+            g = guests[idx]
+            preview.append({"#": idx + 1, "Room": g['room'], "Guest": g['guest_name'][:35]})
+        st.dataframe(pd.DataFrame(preview), use_container_width=True)
+        
+        domain = st.text_input("Email Domain", st.session_state.get('email_domain', 'guest.stay.com'))
+        
+        if st.button("📧 Generate Emails", type="primary"):
+            generate_batch_emails(guests[start_from - 1:end_idx], domain, 'suggestions')
+        
+        if st.button("🚀 Create Mailboxes (Migadu)"):
+            if st.session_state.get('migadu_api_key') and st.session_state.get('migadu_api_secret'):
+                generate_batch_emails(guests[start_from - 1:end_idx], domain, 'create_mailboxes')
+            else:
+                st.error("Configure Migadu API in Settings tab")
     
-    with col_domain2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 Save Domain", use_container_width=True):
-            st.success(f"Domain saved: {domain}")
-    
-    with col_domain3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        # Migadu API settings button
-        if st.button("⚙️ Migadu API Settings", use_container_width=True):
-            st.session_state.show_api_settings = not st.session_state.get('show_api_settings', False)
-            st.rerun()
-    
-    # Migadu API Settings expander
-    if st.session_state.get('show_api_settings', False):
-        with st.expander("🔧 Migadu API Configuration", expanded=True):
-            st.markdown("""
-            **Migadu API Settings**
-            
-            You need your API credentials from Migadu to automatically create mailboxes.
-            """)
-            
-            col_api1, col_api2 = st.columns(2)
-            with col_api1:
-                api_key = st.text_input(
-                    "API Key",
-                    type="password",
-                    value=st.session_state.get('migadu_api_key', ''),
-                    help="Your Migadu API key"
-                )
-                st.session_state.migadu_api_key = api_key
-            
-            with col_api2:
-                api_secret = st.text_input(
-                    "API Secret",
-                    type="password",
-                    value=st.session_state.get('migadu_api_secret', ''),
-                    help="Your Migadu API secret"
-                )
-                st.session_state.migadu_api_secret = api_secret
-            
-            col_test1, col_test2 = st.columns(2)
-            with col_test1:
-                if st.button("🔌 Test Connection", use_container_width=True):
-                    if api_key and api_secret and domain:
-                        with st.spinner("Testing connection..."):
-                            test_result = test_migadu_connection(domain, api_key, api_secret)
-                            if test_result:
-                                st.success("✅ Connection successful!")
-                            else:
-                                st.error("❌ Connection failed. Check your credentials.")
+    # ========== TAB 3: Settings ==========
+    with tab3:
+        st.subheader("Email Domain")
+        domain = st.text_input("Default Domain", st.session_state.get('email_domain', 'guest.stay.com'))
+        if st.button("Save Domain"):
+            st.session_state.email_domain = domain
+            st.success(f"Saved: {domain}")
+        
+        st.markdown("---")
+        st.subheader("Migadu API")
+        
+        api_key = st.text_input("API Key", type="password", value=st.session_state.get('migadu_api_key', ''))
+        api_secret = st.text_input("API Secret", type="password", value=st.session_state.get('migadu_api_secret', ''))
+        
+        if api_key:
+            st.session_state.migadu_api_key = api_key
+        if api_secret:
+            st.session_state.migadu_api_secret = api_secret
+        
+        if st.button("Test Connection"):
+            if api_key and api_secret and domain:
+                with st.spinner("Testing..."):
+                    if test_migadu_connection(domain, api_key, api_secret):
+                        st.success("✅ Connected!")
                     else:
-                        st.warning("Please enter API credentials and domain first")
-            
-            with col_test2:
-                st.caption("API Endpoint: https://api.migadu.com/v1/domains/" + domain + "/mailboxes")
-    
-    st.caption(f"📧 Emails will be created as: `username@{domain}`")
-    
-    # ========== BATCH SELECTION CONTROLS ==========
-    st.markdown("---")
-    st.subheader("📦 Batch Selection")
-    
-    # Row 1: Batch size and start record (inline layout)
-    col_batch1, col_batch2, col_batch3 = st.columns([2, 2, 1])
-    
-    with col_batch1:
-        batch_size = st.number_input(
-            "Number of records",
-            min_value=1,
-            max_value=len(guests),
-            value=min(50, len(guests)),
-            step=10,
-            help="How many consecutive records to select"
-        )
-    
-    with col_batch2:
-        start_from = st.number_input(
-            "Start from record",
-            min_value=1,
-            max_value=len(guests),
-            value=1,
-            step=1,
-            help="Record number to start from"
-        )
-    
-    with col_batch3:
-        st.markdown("<br>", unsafe_allow_html=True)  # Align button with inputs
-        if st.button("📋 Select Batch", type="primary", use_container_width=True):
-            # Calculate end index
-            end_index = min(start_from + batch_size - 1, len(guests))
-            batch_indices = list(range(start_from - 1, end_index))
-            
-            st.session_state.batch_selected_indices = batch_indices
-            st.session_state.batch_selected_guests = [guests[i] for i in batch_indices]
-            st.session_state.show_batch_modal = True
-            st.rerun()
-    
-    st.caption(f"💡 Records: 1 to {len(guests)}. Select starting record and batch size.")
-    
-    # ========== BATCH CONFIRMATION MODAL ==========
-    if st.session_state.get('show_batch_modal', False):
-        batch_guests = st.session_state.get('batch_selected_guests', [])
-        batch_indices = st.session_state.get('batch_selected_indices', [])
+                        st.error("❌ Failed")
+            else:
+                st.warning("Enter credentials and domain")
         
-        if batch_guests:
-            start_num = batch_indices[0] + 1 if batch_indices else 0
-            end_num = batch_indices[-1] + 1 if batch_indices else 0
-            
-            st.markdown("---")
-            st.warning(f"📋 You selected {len(batch_guests)} records (Record #{start_num} to #{end_num})")
-            
-            # Show preview of selected records
-            with st.expander(f"📋 Preview Selected Records ({len(batch_guests)} guests)", expanded=True):
-                preview_data = []
-                for idx, guest in enumerate(batch_guests[:20]):
-                    preview_data.append({
-                        "#": batch_indices[idx] + 1,
-                        "Room": guest['room'],
-                        "Guest Name": guest['guest_name'][:40],
-                        "Arrival": guest.get('arrival_date', 'N/A'),
-                        "Departure": guest.get('departure_date', 'N/A')
-                    })
-                st.dataframe(pd.DataFrame(preview_data), use_container_width=True)
-                if len(batch_guests) > 20:
-                    st.caption(f"... and {len(batch_guests) - 20} more records")
-            
-            # Action options
-            st.markdown("### Choose Action")
-            
-            col_action1, col_action2, col_action3 = st.columns(3)
-            
-            with col_action1:
-                if st.button("📧 Generate Email Suggestions Only", type="primary", use_container_width=True):
-                    generate_batch_emails(batch_guests, domain, mode='suggestions')
-                    st.session_state.show_batch_modal = False
-            
-            with col_action2:
-                if st.button("🚀 Create Mailboxes (Migadu)", type="secondary", use_container_width=True):
-                    if st.session_state.get('migadu_api_key') and st.session_state.get('migadu_api_secret'):
-                        generate_batch_emails(batch_guests, domain, mode='create_mailboxes')
-                        st.session_state.show_batch_modal = False
-                    else:
-                        st.error("Please configure Migadu API settings first")
-            
-            with col_action3:
-                if st.button("❌ Cancel", use_container_width=True):
-                    st.session_state.show_batch_modal = False
-                    st.session_state.batch_selected_guests = []
-                    st.session_state.batch_selected_indices = []
-                    st.rerun()
-    
-    # ========== DISPLAY ALL GUESTS TABLE ==========
-    st.markdown("---")
-    st.subheader("📋 All Extracted Guests")
-    
-    # Add row numbers to the display
-    guest_data = []
-    for idx, guest in enumerate(guests):
-        guest_data.append({
-            "#": idx + 1,
-            "Room": guest['room'],
-            "Guest Name": guest['guest_name'][:50],
-            "Arrival": guest.get('arrival_date', 'N/A'),
-            "Departure": guest.get('departure_date', 'N/A'),
-            "Source": guest.get('source', 'N/A')
-        })
-    
-    df_guests = pd.DataFrame(guest_data)
-    st.dataframe(df_guests, use_container_width=True, height=400)
-    
-    # Alternative manual selection
-    with st.expander("🔘 Alternative: Manual Selection (Select individual guests)"):
-        st.markdown("**Select guests to generate emails for:**")
+        st.markdown("---")
+        st.subheader("Data Quality")
+        st.caption(f"PDF pages: {st.session_state.get('total_pages', 0)} | Guests: {len(guests)}")
         
-        select_all = st.checkbox("Select All Guests", key="manual_select_all")
-        
-        selected_guests_manual = []
-        cols = st.columns(4)
-        for i, guest in enumerate(guests):
-            col_idx = i % 4
-            with cols[col_idx]:
-                checked = st.checkbox(f"{guest['room']}", key=f"guest_manual_{i}", value=select_all)
-                if checked:
-                    selected_guests_manual.append(guest)
-        
-        if selected_guests_manual:
-            st.markdown(f"**{len(selected_guests_manual)} guests selected**")
-            
-            col_manual1, col_manual2 = st.columns([2, 1])
-            with col_manual1:
-                manual_domain = st.text_input("Email Domain", value=domain, key="manual_domain")
-            with col_manual2:
-                st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("📧 Generate Email Suggestions", type="primary", key="manual_generate"):
-                    generate_batch_emails(selected_guests_manual, manual_domain, mode='suggestions')
-
-    # Debug expander
-    with st.expander("🔍 Debug: View Raw Extracted Text (first 2000 chars)"):
-        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            raw_text = ""
-            for page in pdf.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    raw_text += extracted + "\n"
-        st.code(raw_text[:2000], language="text")
-
-
+        # Duplicate checker with page numbers
+        with st.expander("🔍 Find Duplicates"):
+            if st.button("Check for Duplicates"):
+                dup_map = {}
+                for g in guests:
+                    # Create key for duplicate detection
+                    key = f"{g['room']}_{g['guest_name'].strip()}_{g.get('arrival_date', '')}"
+                    if key not in dup_map:
+                        dup_map[key] = []
+                    dup_map[key].append(g)
+                
+                duplicates = {k: v for k, v in dup_map.items() if len(v) > 1}
+                
+                if duplicates:
+                    st.warning(f"Found {len(duplicates)} duplicate groups")
+                    
+                    # Show summary of duplicates
+                    dup_summary = []
+                    for key, dups in duplicates.items():
+                        parts = key.split('_', 2)
+                        room = parts[0]
+                        name = parts[1][:35]
+                        dup_summary.append({"Room": room, "Guest": name, "Copies": len(dups)})
+                    st.dataframe(pd.DataFrame(dup_summary), use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.markdown("### Detailed Duplicate Records")
+                    
+                    for key, dups in duplicates.items():
+                        parts = key.split('_', 2)
+                        room = parts[0]
+                        name = parts[1][:40]
+                        arrival = parts[2] if len(parts) > 2 else "Unknown"
+                        
+                        with st.expander(f"🔁 Room {room} - {name} - Arrival {arrival} ({len(dups)} copies)"):
+                            dup_data = []
+                            for i, d in enumerate(dups):
+                                dup_data.append({
+                                    "Copy": i + 1,
+                                    "Guest Name": d['guest_name'],
+                                    "Arrival": d.get('arrival_date', 'N/A'),
+                                    "Departure": d.get('departure_date', 'N/A'),
+                                    "Source": d.get('source', 'N/A')
+                                })
+                            st.dataframe(pd.DataFrame(dup_data), use_container_width=True)
+                else:
+                    st.success("No duplicates found")
 def generate_batch_emails(guests, domain, mode='suggestions'):
     """
     Generate emails for a batch of guests
