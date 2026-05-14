@@ -2,3 +2,5 @@ streamlit[pdf]
 pdfplumber
 pandas
 pymupdf
+requests
+openpyxl

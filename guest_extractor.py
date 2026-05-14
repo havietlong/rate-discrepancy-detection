@@ -3,7 +3,7 @@ Guest Extractor Module
 Extracts guest names from PDF and generates email suggestions
 Supports both: Night Audit reports AND Arrivals reports
 """
-
+import requests
 import streamlit as st
 import pdfplumber
 import re
@@ -12,6 +12,9 @@ from io import BytesIO
 from datetime import datetime
 
 # Initialize session state for batch selection and API settings
+# Add to your existing session state initialization
+if 'migadu_email' not in st.session_state:
+    st.session_state.migadu_email = ''
 if 'batch_selected_indices' not in st.session_state:
     st.session_state.batch_selected_indices = []
 if 'batch_selected_guests' not in st.session_state:
@@ -602,6 +605,55 @@ def detect_pdf_format(pdf_bytes):
         else:
             return "Unknown"
 
+def get_migadu_domain_info(domain, api_email, api_secret):
+    """
+    Fetch domain information from Migadu API
+    """
+    import requests
+    
+    url = f"https://api.migadu.com/v1/domains/{domain}"
+    
+    try:
+        response = requests.get(
+            url,
+            auth=(api_email, api_secret),
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Status {response.status_code}: {response.text[:200]}")
+            return None
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None
+
+def test_migadu_connection(domain, api_email, api_secret):
+    """
+    Test connection to Migadu API
+    - api_email: Your Migadu account email address (username)
+    - api_secret: Your API key secret
+    """
+    import requests
+    
+    url = f"https://api.migadu.com/v1/domains/{domain}"
+    
+    try:
+        response = requests.get(
+            url,
+            auth=(api_email, api_secret),
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return True
+        else:
+            return False
+            
+    except Exception:
+        return False
 
 def extract_guests_from_arrivals_report_silent(text):
     """
@@ -705,6 +757,308 @@ def extract_guests_from_arrivals_report_silent(text):
     
     return guests
 
+def verify_domain(domain):
+    """
+    Simple domain verification using DNS lookup
+    """
+    import socket
+    
+    try:
+        # Basic DNS resolution
+        socket.gethostbyname(domain)
+        return True, "Domain resolves"
+    except socket.gaierror:
+        return False, "Domain does not resolve"
+    
+def generate_batch_emails(guests, domain, mode='create_mailboxes'):
+    """
+    Generate emails for a batch of guests and create mailboxes via Migadu
+    """
+    all_guest_data = []
+    domain = domain or st.session_state.get('email_domain', 'guest.stay.com')
+    
+    # Track success/failure for mailbox creation
+    success_count = 0
+    fail_count = 0
+    failed_emails = []
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, guest in enumerate(guests):
+        # Clean guest name and extract parts
+        full_name = clean_guest_name(guest['guest_name'])
+        
+        # Parse first and last name
+        first_name = ""
+        last_name = ""
+        
+        if ',' in full_name:
+            # Format: "Last, First"
+            parts = full_name.split(',')
+            last_name = parts[0].strip()
+            first_name = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            # Format: "First Last"
+            name_parts = full_name.split()
+            if len(name_parts) >= 2:
+                first_name = name_parts[0]
+                last_name = name_parts[-1]
+            elif len(name_parts) == 1:
+                first_name = name_parts[0]
+                last_name = name_parts[0]
+        
+        # Generate email local_part based on guest name
+        local_part = generate_local_part(guest['guest_name'], guest['room'])
+        primary_email = f"{local_part}@{domain}"
+        
+        # Store all data
+        guest_record = {
+            'room': guest['room'],
+            'full_name': full_name,
+            'first_name': first_name,
+            'last_name': last_name,
+            'email': primary_email,
+            'local_part': local_part,
+            'password': 'Abc@123456',
+            'arrival_date': guest.get('arrival_date', ''),
+            'departure_date': guest.get('departure_date', '')
+        }
+        all_guest_data.append(guest_record)
+        
+        # Create mailbox via Migadu API
+        status_text.text(f"Creating mailbox for {full_name[:30]}... ({i+1}/{len(guests)})")
+        
+        result = create_mailbox_via_migadu(
+            domain, 
+            local_part, 
+            full_name,
+            st.session_state.get('migadu_email', ''),
+            st.session_state.get('migadu_api_secret', '')
+        )
+        
+        if result:
+            success_count += 1
+        else:
+            fail_count += 1
+            failed_emails.append(primary_email)
+        
+        progress_bar.progress((i + 1) / len(guests))
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Display results
+    st.markdown("---")
+    st.subheader("📧 Email Creation Results")
+    
+    # Create full DataFrame
+    df_export = pd.DataFrame([{
+        'Room': item['room'],
+        'Full Name': item['full_name'],
+        'First Name': item['first_name'],
+        'Last Name': item['last_name'],
+        'Email': item['email'],
+        'Password': item['password'],
+        'Arrival Date': item['arrival_date'],
+        'Departure Date': item['departure_date']
+    } for item in all_guest_data])
+    
+    # Display the full table (spanning full width)
+    st.dataframe(df_export, use_container_width=True)
+    
+    # Show summary for mailbox creation
+    if success_count > 0:
+        st.success(f"✅ Created {success_count} mailboxes successfully!")
+    if fail_count > 0:
+        st.error(f"❌ Failed to create {fail_count} mailboxes")
+        with st.expander("View failed emails"):
+            for email in failed_emails:
+                st.write(f"- {email}")
+    
+    # Export options
+    st.markdown("---")
+    st.subheader("💾 Export Data")
+    
+    col_export1, col_export2 = st.columns(2)
+    
+    with col_export1:
+        # CSV export
+        csv_data = df_export.to_csv(index=False)
+        st.download_button(
+            label="📥 Download as CSV",
+            data=csv_data,
+            file_name=f"guest_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with col_export2:
+        # Excel export
+        try:
+            import io
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_export.to_excel(writer, index=False, sheet_name='Guest Emails')
+            excel_data = output.getvalue()
+            
+            st.download_button(
+                label="📥 Download as Excel",
+                data=excel_data,
+                file_name=f"guest_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        except ImportError:
+            st.warning("Excel export requires openpyxl. Install with: pip install openpyxl")
+            # Fallback to CSV only
+            st.info("Excel export not available. Please install openpyxl or use CSV.")
+    
+    st.info(f"💡 Password for all mailboxes: **Abc@123456**")
+
+def generate_local_part(guest_name, room_number):
+    """
+    Generate random local part for email based on guest name
+    Examples:
+    - An,Chang Ho -> an.chang.ho123 or an-chang-ho456 or anchangho789
+    - Andrew Vincent,Boyce -> andrew.boyce123 or andrew-boyce456
+    - With dash: dwightcrawford.robinson-94
+    - Without dash: dwightcrawford.robinson94
+    """
+    import random
+    
+    # Clean the guest name
+    name = clean_guest_name(guest_name)
+    name_lower = name.lower()
+    
+    # Parse the name properly
+    name_parts = []
+    
+    # Handle "Last, First Middle" format
+    if ',' in name_lower:
+        parts = name_lower.split(',')
+        last_name = parts[0].strip()
+        first_middle = parts[1].strip() if len(parts) > 1 else ""
+        
+        # Add last name
+        if last_name:
+            name_parts.append(last_name)
+        
+        # Split first and middle names
+        if first_middle:
+            first_parts = first_middle.split()
+            name_parts.extend(first_parts)
+    else:
+        # Standard "First Last" format
+        name_parts = name_lower.split()
+    
+    # Remove empty parts and clean (only keep letters)
+    name_parts = [re.sub(r'[^a-z]', '', p) for p in name_parts if p]
+    
+    # If no valid parts, use room number
+    if not name_parts:
+        name_parts = [f"guest{room_number}"]
+    
+    # Generate unique random suffix (10-999)
+    random_suffix = random.randint(10, 999)
+    
+    # Randomly choose format (0-4)
+    # 0: dots with dash (e.g., an.chang-123)
+    # 1: dots with dash (multiple dots) (e.g., an.chang.ho-456)
+    # 2: hyphens with dash (e.g., an-chang-789)
+    # 3: no separators with dash (e.g., anchang-234)
+    # 4: no separators without dash (e.g., anchang567)
+    format_choice = random.randint(0, 4)
+    
+    if format_choice == 0:
+        # Format: first.last-suffix (with dash)
+        if len(name_parts) >= 2:
+            base = f"{name_parts[0]}.{name_parts[-1]}"
+        else:
+            base = name_parts[0]
+        local_part = f"{base}-{random_suffix}"
+    
+    elif format_choice == 1:
+        # Format: first.last.last-suffix (with dash, multiple dots)
+        if len(name_parts) >= 2:
+            base = '.'.join(name_parts[:2])
+        else:
+            base = name_parts[0]
+        local_part = f"{base}-{random_suffix}"
+    
+    elif format_choice == 2:
+        # Format: first-last-suffix (hyphens with dash)
+        if len(name_parts) >= 2:
+            base = '-'.join(name_parts[:2])
+        else:
+            base = name_parts[0]
+        local_part = f"{base}-{random_suffix}"
+    
+    elif format_choice == 3:
+        # Format: firstlast-suffix (no separators, but with dash)
+        base = ''.join(name_parts[:2]) if len(name_parts) >= 2 else name_parts[0]
+        local_part = f"{base}-{random_suffix}"
+    
+    else:
+        # Format: firstlastsuffix (no separators, NO dash)
+        base = ''.join(name_parts[:2]) if len(name_parts) >= 2 else name_parts[0]
+        local_part = f"{base}{random_suffix}"
+    
+    # Ensure local_part is valid (only lowercase letters, numbers, dots, hyphens)
+    local_part = re.sub(r'[^a-z0-9.-]', '', local_part)
+    # Remove leading/trailing dots or hyphens
+    local_part = local_part.strip('.-')
+    # Limit to 40 characters
+    local_part = local_part[:40]
+    
+    return local_part
+
+def create_mailbox_via_migadu(domain, local_part, guest_name, api_email, api_secret):
+    """
+    Create a mailbox via Migadu API
+    Uses POST method to create mailbox with password
+    """
+    import requests
+    
+    url = f"https://api.migadu.com/v1/domains/{domain}/mailboxes"
+    
+    # Clean local_part (ensure it's valid)
+    local_part = re.sub(r'[^a-z0-9.-]', '', local_part.lower())
+    local_part = local_part.strip('.-')
+    
+    # Default password (as requested)
+    password = "Abc@123456"
+    
+    # Create mailbox name from guest name (clean it)
+    mailbox_name = guest_name.strip()
+    # Remove special characters from name for display
+    mailbox_name = re.sub(r'[^\w\s]', ' ', mailbox_name)
+    mailbox_name = re.sub(r'\s+', ' ', mailbox_name).strip()
+    mailbox_name = mailbox_name[:50]
+    
+    payload = {
+        "name": mailbox_name,
+        "local_part": local_part,
+        "password": password
+    }
+    
+    try:
+        response = requests.post(
+            url,
+            auth=(api_email, api_secret),
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201]:
+            return True
+        else:
+            return False
+            
+    except Exception as e:
+        return False
+
 def display_guest_extractor(pdf_bytes):
     """
     Main function for Guest Extractor - CLEAN VERSION with working duplicate display
@@ -745,8 +1099,14 @@ def display_guest_extractor(pdf_bytes):
     # Create tabs
     tab1, tab2, tab3 = st.tabs(["📋 Guest List", "📦 Batch Export", "⚙️ Settings"])
     
+    
     # ========== TAB 1: Guest List ==========
     with tab1:
+        st.subheader("All Extracted Guests")
+        
+        # Data Quality section moved here
+        st.caption(f"📊 PDF pages: {st.session_state.get('total_pages', 0)} | Guests: {len(guests)}")
+        
         # Prepare data for display
         guest_data = []
         for idx, guest in enumerate(guests):
@@ -767,77 +1127,13 @@ def display_guest_extractor(pdf_bytes):
             st.download_button("📥 CSV", df_guests.to_csv(index=False), f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
         with col2:
             st.download_button("📥 JSON", df_guests.to_json(orient='records', indent=2), f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "application/json")
-    
-    # ========== TAB 2: Batch Export ==========
-    with tab2:
-        st.subheader("Batch Email Generation")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            batch_size = st.number_input("Records", 1, len(guests), min(50, len(guests)), 10)
-        with col2:
-            start_from = st.number_input("Start from", 1, len(guests), 1, 1)
-        
-        end_idx = min(start_from + batch_size - 1, len(guests))
-        st.info(f"Records #{start_from} to #{end_idx} ({batch_size} records)")
-        
-        # Preview
-        preview = []
-        for idx in range(start_from - 1, end_idx):
-            g = guests[idx]
-            preview.append({"#": idx + 1, "Room": g['room'], "Guest": g['guest_name'][:35]})
-        st.dataframe(pd.DataFrame(preview), use_container_width=True)
-        
-        domain = st.text_input("Email Domain", st.session_state.get('email_domain', 'guest.stay.com'))
-        
-        if st.button("📧 Generate Emails", type="primary"):
-            generate_batch_emails(guests[start_from - 1:end_idx], domain, 'suggestions')
-        
-        if st.button("🚀 Create Mailboxes (Migadu)"):
-            if st.session_state.get('migadu_api_key') and st.session_state.get('migadu_api_secret'):
-                generate_batch_emails(guests[start_from - 1:end_idx], domain, 'create_mailboxes')
-            else:
-                st.error("Configure Migadu API in Settings tab")
-    
-    # ========== TAB 3: Settings ==========
-    with tab3:
-        st.subheader("Email Domain")
-        domain = st.text_input("Default Domain", st.session_state.get('email_domain', 'guest.stay.com'))
-        if st.button("Save Domain"):
-            st.session_state.email_domain = domain
-            st.success(f"Saved: {domain}")
-        
+        # Duplicate checker moved here
         st.markdown("---")
-        st.subheader("Migadu API")
-        
-        api_key = st.text_input("API Key", type="password", value=st.session_state.get('migadu_api_key', ''))
-        api_secret = st.text_input("API Secret", type="password", value=st.session_state.get('migadu_api_secret', ''))
-        
-        if api_key:
-            st.session_state.migadu_api_key = api_key
-        if api_secret:
-            st.session_state.migadu_api_secret = api_secret
-        
-        if st.button("Test Connection"):
-            if api_key and api_secret and domain:
-                with st.spinner("Testing..."):
-                    if test_migadu_connection(domain, api_key, api_secret):
-                        st.success("✅ Connected!")
-                    else:
-                        st.error("❌ Failed")
-            else:
-                st.warning("Enter credentials and domain")
-        
-        st.markdown("---")
-        st.subheader("Data Quality")
-        st.caption(f"PDF pages: {st.session_state.get('total_pages', 0)} | Guests: {len(guests)}")
-        
-        # Duplicate checker with page numbers
         with st.expander("🔍 Find Duplicates"):
             if st.button("Check for Duplicates"):
                 dup_map = {}
                 for g in guests:
-                    # Create key for duplicate detection
                     key = f"{g['room']}_{g['guest_name'].strip()}_{g.get('arrival_date', '')}"
                     if key not in dup_map:
                         dup_map[key] = []
@@ -848,7 +1144,6 @@ def display_guest_extractor(pdf_bytes):
                 if duplicates:
                     st.warning(f"Found {len(duplicates)} duplicate groups")
                     
-                    # Show summary of duplicates
                     dup_summary = []
                     for key, dups in duplicates.items():
                         parts = key.split('_', 2)
@@ -879,128 +1174,91 @@ def display_guest_extractor(pdf_bytes):
                             st.dataframe(pd.DataFrame(dup_data), use_container_width=True)
                 else:
                     st.success("No duplicates found")
-def generate_batch_emails(guests, domain, mode='suggestions'):
-    """
-    Generate emails for a batch of guests
-    mode: 'suggestions' (just generate suggestions) or 'create_mailboxes' (actually create via Migadu)
-    """
-    all_suggestions = []
-    domain = domain or st.session_state.get('email_domain', 'guest.stay.com')
     
-    for guest in guests:
-        suggestions = generate_email_suggestions(guest['guest_name'], guest['room'])
+    # ========== TAB 2: Batch Export ==========
+    with tab2:
+        st.subheader("Batch Email Creation")
         
-        # Use first suggestion as primary email
-        primary_email = f"{suggestions[0]}@{domain}" if suggestions else f"guest.{guest['room']}@{domain}"
+        col1, col2 = st.columns(2)
+        with col1:
+            batch_size = st.number_input("Records", 1, len(guests), min(50, len(guests)), 10)
+        with col2:
+            start_from = st.number_input("Start from", 1, len(guests), 1, 1)
         
-        all_suggestions.append({
-            'room': guest['room'],
-            'guest_name': guest['guest_name'],
-            'arrival_date': guest.get('arrival_date', ''),
-            'departure_date': guest.get('departure_date', ''),
-            'email': primary_email,
-            'suggestions': suggestions[:3]
-        })
+        end_idx = min(start_from + batch_size - 1, len(guests))
+        st.info(f"Records #{start_from} to #{end_idx} ({batch_size} records)")
         
-        # If mode is create_mailboxes, call Migadu API
-        if mode == 'create_mailboxes':
-            create_mailbox_via_migadu(domain, primary_email, guest['guest_name'])
+        # Preview
+        preview = []
+        for idx in range(start_from - 1, end_idx):
+            g = guests[idx]
+            preview.append({"#": idx + 1, "Room": g['room'], "Guest": g['guest_name'][:35]})
+        st.dataframe(pd.DataFrame(preview), use_container_width=True)
+        
+        domain = st.text_input("Email Domain", st.session_state.get('email_domain', 'guest.stay.com'))
+        
+        # Only keep the Create Mailboxes button
+        if st.button("🚀 Create Mailboxes (Migadu)", type="primary", use_container_width=True):
+            if st.session_state.get('migadu_email') and st.session_state.get('migadu_api_secret'):
+                generate_batch_emails(guests[start_from - 1:end_idx], domain, 'create_mailboxes')
+            else:
+                st.error("Configure Migadu API in Settings tab")
     
-    # Display results
-    st.markdown("---")
-    st.subheader("📧 Email Results")
-    
-    df_export = pd.DataFrame([{
-        'room': item['room'],
-        'guest_name': item['guest_name'],
-        'email': item['email'],
-        'arrival_date': item['arrival_date'],
-        'departure_date': item['departure_date']
-    } for item in all_suggestions])
-    
-    st.dataframe(df_export, use_container_width=True)
-    
-    # Export options
-    col_export1, col_export2 = st.columns(2)
-    
-    with col_export1:
-        csv_data = df_export.to_csv(index=False)
-        st.download_button(
-            label="📥 Download as CSV",
-            data=csv_data,
-            file_name=f"guest_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-    
-    with col_export2:
-        json_data = df_export.to_json(orient='records', indent=2)
-        st.download_button(
-            label="📥 Download as JSON",
-            data=json_data,
-            file_name=f"guest_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json"
-        )
-    
-    if mode == 'create_mailboxes':
-        st.success(f"✅ Mailbox creation initiated for {len(all_suggestions)} guests")
-    else:
-        st.info(f"💡 Suggestions generated for {len(all_suggestions)} guests")
-
-
-def test_migadu_connection(domain, api_key, api_secret):
-    """
-    Test connection to Migadu API
-    """
-    import requests
-    
-    url = f"https://api.migadu.com/v1/domains/{domain}"
-    
-    try:
-        response = requests.get(
-            url,
-            auth=(api_key, api_secret),
-            timeout=10
-        )
-        return response.status_code == 200
-    except Exception as e:
-        st.error(f"Connection error: {str(e)}")
-        return False
-
-
-def create_mailbox_via_migadu(domain, email, guest_name):
-    """
-    Create a mailbox via Migadu API
-    """
-    import requests
-    
-    api_key = st.session_state.get('migadu_api_key')
-    api_secret = st.session_state.get('migadu_api_secret')
-    
-    if not api_key or not api_secret:
-        return False
-    
-    # Extract local part from email
-    local_part = email.split('@')[0]
-    
-    url = f"https://api.migadu.com/v1/domains/{domain}/mailboxes/{local_part}"
-    
-    payload = {
-        "name": guest_name[:50],
-        "local_part": local_part,
-        "password": None,  # Will generate random password
-        "spam_filter": "tag",
-        "spam_aggressiveness": "normal",
-        "remove_spam_filters": False
-    }
-    
-    try:
-        response = requests.put(
-            url,
-            auth=(api_key, api_secret),
-            json=payload,
-            timeout=30
-        )
-        return response.status_code in [200, 201]
-    except Exception as e:
-        st.error(f"Failed to create {email}: {str(e)}")
-        return False
+    # ========== TAB 3: Settings ==========
+    with tab3:
+        st.subheader("Email Domain")
+        
+        col_domain1, col_domain2 = st.columns([3, 1])
+        with col_domain1:
+            domain = st.text_input("Default Domain", st.session_state.get('email_domain', 'guest.stay.com'))
+        with col_domain2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🌐 Verify Domain", use_container_width=True):
+                if domain:
+                    with st.spinner(f"Verifying {domain}..."):
+                        import socket
+                        try:
+                            socket.gethostbyname(domain)
+                            st.success(f"✅ Domain {domain} resolves")
+                        except socket.gaierror:
+                            st.error(f"❌ Cannot resolve domain {domain}")
+                else:
+                    st.warning("Please enter a domain first")
+        
+        if st.button("💾 Save Domain", use_container_width=True):
+            st.session_state.email_domain = domain
+            st.success(f"Domain saved: {domain}")
+        
+        st.markdown("---")
+        st.subheader("Migadu API")
+        st.caption("You need your Migadu account email and API secret from My Account > API Keys")
+        
+        col_api1, col_api2 = st.columns(2)
+        with col_api1:
+            api_email = st.text_input(
+                "Migadu Account Email", 
+                value=st.session_state.get('migadu_email', ''),
+                type="default",
+                help="Your Migadu login email address"
+            )
+            st.session_state.migadu_email = api_email
+        
+        with col_api2:
+            api_secret = st.text_input(
+                "API Secret", 
+                value=st.session_state.get('migadu_api_secret', ''),
+                type="password",
+                help="Your API key secret from Migadu"
+            )
+            st.session_state.migadu_api_secret = api_secret
+        
+        if st.button("🔌 Test API Connection", use_container_width=True):
+            if api_email and api_secret and domain:
+                with st.spinner("Testing Migadu API connection..."):
+                    test_result = test_migadu_connection(domain, api_email, api_secret)
+                    if test_result:
+                        st.success("✅ Migadu API connected!")
+                    else:
+                        st.error("❌ API connection failed")
+            else:
+                st.warning("Enter email, API secret, and domain first")
