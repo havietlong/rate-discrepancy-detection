@@ -1,5 +1,7 @@
 import streamlit as st
 import pdfplumber
+import invoice_editor
+import helios_editor
 import re
 from datetime import datetime
 import pandas as pd
@@ -9,6 +11,7 @@ import base64
 import os
 import fitz  # PyMuPDF
 from rate_parser import RateParser
+import police_report_converter
 
 import guest_extractor
 
@@ -235,9 +238,14 @@ with st.sidebar:
     st.header("⚙️ Mode Selection")
     # Changed from radio to selectbox (dropdown)
     app_mode = st.selectbox(
-        "Select Mode:",
-        options=["🔍 Rate Discrepancy Scanner", "📇 Guest Email Generator"],
-        help="Rate Scanner: Find rate discrepancies in night audit reports. Guest Extractor: Extract guest names and generate dummy emails."
+    "Select Mode:",
+    options=[
+        "🔍 Rate Discrepancy Scanner",
+        "📇 Guest Email Generator",
+        # "📄 Helios Editor",
+        "📄 Police Report to XML"
+    ],
+    help="Rate Scanner: Find rate discrepancies. Guest Extractor: Extract guest names and generate emails. HeliosEditor: Edit existing invoice PDFs. Police Report: Convert police report to KHAI_BAO_TAM_TRU XML."
     )
     
     # Only show tolerance slider in Rate Scanner mode
@@ -714,9 +722,16 @@ if uploaded_file:
                     | Timestamp | When you made the correction |
                     """)
     
-    else:
+    elif app_mode == "📇 Guest Email Generator":
         # ========== GUEST EMAIL GENERATOR MODE ==========
         guest_extractor.display_guest_extractor(pdf_bytes)
+    # elif app_mode == "📄 Invoice Editor":
+    #     # ========== INVOICE EDITOR MODE ==========
+    #     invoice_editor.display_invoice_editor(pdf_bytes)   
+    elif app_mode == "📄 Helios Editor":
+        helios_editor.display_helios_editor(pdf_bytes)
+    elif app_mode == "📄 Police Report to XML":
+        police_report_converter.display_police_report_converter(pdf_bytes)
 
 else:
     # No file uploaded - show welcome screen based on mode
@@ -729,7 +744,7 @@ else:
         - Highlights discrepancies with red/yellow boxes
         - Export training data for ML improvement
         """)
-    else:
+    elif app_mode == "📇 Guest Email Generator":
         st.info("👈 Please upload a PDF to extract guest names")
         st.markdown("""
         ### 📇 Guest Email Generator
@@ -737,4 +752,35 @@ else:
         - Automatically extracts guest names and room numbers
         - Generate dummy email addresses
         - Export as CSV or JSON for API integration
+        """)
+    # elif app_mode == "📄 Invoice Editor":
+    #     st.info("👈 Please upload a PDF invoice template or start from scratch")
+    #     st.markdown("""
+    #     ### 📄 Invoice Editor
+    #     - Upload a PDF invoice template (optional)
+    #     - Add guest information (name, room, dates)
+    #     - Add items with quantities and prices
+    #     - Automatic tax calculation (Vietnam: price × 1.134)
+    #     - Generate and download the final invoice as PDF
+    #     """)
+    elif app_mode == "📄 Helios Editor":
+        st.info("👈 Please upload an invoice PDF to edit")
+        st.markdown("""
+        ### 📄 HeliosEditor - Invoice PDF Editor
+        - Upload an existing invoice PDF
+        - Edit guest information, room details, and dates
+        - Add or remove items/charges
+        - Update financial totals
+        - Preserves the original invoice format
+        """)
+    elif app_mode == "📄 Police Report to XML":
+        st.info("👈 Please upload a police report PDF to convert to KHAI_BAO_TAM_TRU XML")
+        st.markdown("""
+        ### 📄 Police Report to XML Converter
+        - Upload your police report PDF
+        - Extracts guest information (room, name, dates, passport, DOB, nationality)
+        - Auto-detects gender from titles (Mr., Ms., Mrs.)
+        - Converts to KHAI_BAO_TAM_TRU XML format
+        - Edit data before generating XML
+        - Download as XML or JSON
         """)

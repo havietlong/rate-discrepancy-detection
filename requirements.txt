@@ -1,6 +1,9 @@
-streamlit[pdf]
+streamlit
 pdfplumber
 pandas
 pymupdf
 requests
 openpyxl
+python-docx
+weasyprint
+streamlit-ws-localstorage
