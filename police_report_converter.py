@@ -1,6 +1,8 @@
 """
-Police Report to XML Converter
-Extracts guest data from police report PDF and converts to KHAI_BAO_TAM_TRU XML format
+Police Report to XML/Excel Converter
+Extracts guest data from police report PDF and converts to:
+- XML for foreign guests (KHAI_BAO_TAM_TRU)
+- Excel for Vietnamese guests (DS_KHACH_VIET_NAM_LUU_TRU)
 """
 
 import streamlit as st
@@ -13,6 +15,9 @@ from xml.dom import minidom
 from io import BytesIO
 import base64
 import json
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 # Country code mapping (2-letter → 3-letter)
 COUNTRY_CODE_MAP = {
@@ -44,6 +49,16 @@ COUNTRY_CODE_MAP = {
     'ZA': 'ZAF',
 }
 
+# Default values for Vietnamese guests
+DEFAULT_VN_GUEST = {
+    'loai_giay_to': '1 - Thẻ CCCD',
+    'noi_cu_tru': '2 - Tạm trú',
+    'tinh_thanh': '101 - TP. Hà Nội',
+    'phuong_xa': '101900167 - Phường Cầu Giấy',
+    'dia_chi_chi_tiet': 'Số 5 Duy Tân',
+    'ly_do_cu_tru': '1 - Du lịch'
+}
+
 def display_pdf_preview(pdf_bytes, height=400):
     """Display PDF preview"""
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -52,9 +67,39 @@ def display_pdf_preview(pdf_bytes, height=400):
         unsafe_allow_html=True
     )
 
+def get_country_name(code_3letter):
+    """Get full country name from 3-letter code"""
+    country_names = {
+        'VNM': 'Viet Nam',
+        'AUS': 'Australia',
+        'JPN': 'Japan',
+        'KOR': 'Korea',
+        'USA': 'United States',
+        'GBR': 'United Kingdom',
+        'FRA': 'France',
+        'DEU': 'Germany',
+        'ITA': 'Italy',
+        'ESP': 'Spain',
+        'CHN': 'China',
+        'SGP': 'Singapore',
+        'MYS': 'Malaysia',
+        'THA': 'Thailand',
+        'IDN': 'Indonesia',
+        'PHL': 'Philippines',
+        'RUS': 'Russia',
+        'CAN': 'Canada',
+        'NZL': 'New Zealand',
+        'IND': 'India',
+        'TWN': 'Taiwan',
+        'BRA': 'Brazil',
+        'MEX': 'Mexico',
+        'ZAF': 'South Africa'
+    }
+    return country_names.get(code_3letter, code_3letter)
+
 def extract_guests_from_police_report(pdf_bytes, debug=False):
     """
-    Extract guest data from police report PDF
+    Extract guest data from police report PDF - supports both Passport and IDC
     """
     if debug:
         st.markdown("### 🔍 Debug Log")
@@ -180,40 +225,61 @@ def extract_guests_from_police_report(pdf_bytes, debug=False):
             if debug:
                 debug_lines.append(f"  Cleaned name: '{guest_name}'")
             
-            # Initialize passport and gender
+            # Initialize document fields
             passport = None
+            id_card_number = None
+            document_type = None  # 'PAS' or 'IDC'
             gender = None
             
-            # Check next 3 lines for passport and gender
+            # Check next 5 lines for document info
             if debug:
-                debug_lines.append(f"  Looking ahead 3 lines for passport and gender:")
+                debug_lines.append(f"  Looking ahead 5 lines for document info:")
             
-            for offset in range(1, 4):
+            for offset in range(1, 6):
                 if i + offset < len(lines):
                     next_line = lines[i + offset].strip()
                     
                     if debug:
                         debug_lines.append(f"    Line {i+offset}: '{next_line}'")
                     
-                    # Check for passport line (contains PAS or RS)
-                    if 'PAS' in next_line:
-                        passport_match = re.search(r'PAS\s*([A-Z0-9]{6,10})', next_line, re.IGNORECASE)
-                        if passport_match:
-                            passport = passport_match.group(1)
-                            if debug:
-                                debug_lines.append(f"    ✅ Found passport: {passport}")
-                        else:
-                            num_match = re.search(r'PAS\s*([A-Z0-9]{5,10})', next_line, re.IGNORECASE)
-                            if num_match:
-                                passport = num_match.group(1)
-                                if debug:
-                                    debug_lines.append(f"    ✅ Found passport (implicit): {passport}")
-                    
-                    if not passport and 'RS' in next_line:
+                    # Check for IDC (Vietnamese Identity Card)
+                    idc_match = re.search(r'\bIDC\s+(\d{9,12})', next_line, re.IGNORECASE)
+                    if idc_match:
+                        id_card_number = idc_match.group(1)
+                        document_type = 'IDC'
                         if debug:
-                            debug_lines.append(f"    ℹ️ Vietnamese guest (RS) - no passport number")
+                            debug_lines.append(f"    ✅ Found IDC number: {id_card_number}")
+                    else:
+                        # Alternative: Check if the line contains "IDC" 
+                        idc_parts = next_line.split()
+                        for idx, part in enumerate(idc_parts):
+                            if part.upper() == 'IDC' and idx + 1 < len(idc_parts):
+                                potential_id = idc_parts[idx + 1]
+                                if re.match(r'^\d{9,12}$', potential_id):
+                                    id_card_number = potential_id
+                                    document_type = 'IDC'
+                                    if debug:
+                                        debug_lines.append(f"    ✅ Found IDC number (alternative): {id_card_number}")
+                                    break
                     
-                    # Look for gender - can be on same line as country description
+                    # Check for PAS (Passport) - only for foreigners
+                    if not document_type or document_type != 'IDC':
+                        if 'PAS' in next_line:
+                            passport_match = re.search(r'PAS\s*([A-Z0-9]{6,10})', next_line, re.IGNORECASE)
+                            if passport_match:
+                                passport = passport_match.group(1)
+                                document_type = 'PAS'
+                                if debug:
+                                    debug_lines.append(f"    ✅ Found passport: {passport}")
+                            else:
+                                pas_match = re.search(r'PAS\s+([A-Z0-9]+)', next_line, re.IGNORECASE)
+                                if pas_match:
+                                    passport = pas_match.group(1)
+                                    document_type = 'PAS'
+                                    if debug:
+                                        debug_lines.append(f"    ✅ Found passport (implicit): {passport}")
+                    
+                    # Look for gender
                     countries_pattern = '|'.join([
                         'Australia', 'Vietnam', 'Japan', 'Korea', 'USA', 'UK', 'France', 
                         'Germany', 'Italy', 'Spain', 'China', 'Singapore', 'Malaysia', 
@@ -227,24 +293,28 @@ def extract_guests_from_police_report(pdf_bytes, debug=False):
                         if debug:
                             debug_lines.append(f"    ✅ Found gender with country: {gender}")
                     else:
-                        # Check for single M or F on its own line
                         gender_single = re.match(r'^\s*([MF])\s*$', next_line)
                         if gender_single:
                             gender = gender_single.group(1)
                             if debug:
                                 debug_lines.append(f"    ✅ Found gender (single): {gender}")
                         else:
-                            # Look for M or F followed by any text
                             gender_any = re.search(r'\b([MF])\s+\w+', next_line)
                             if gender_any:
                                 gender = gender_any.group(1)
                                 if debug:
                                     debug_lines.append(f"    ✅ Found gender (with text): {gender}")
+                    
+                    # If we found both document and gender, stop looking
+                    if (document_type and (passport or id_card_number)) and gender:
+                        break
             
-            if not passport and debug:
-                debug_lines.append(f"  ❌ No passport found in next 3 lines")
+            if not document_type and debug:
+                debug_lines.append(f"  ❌ No document type found (IDC or PAS)")
+            if not passport and not id_card_number and debug:
+                debug_lines.append(f"  ❌ No document number found")
             if not gender and debug:
-                debug_lines.append(f"  ❌ No gender found in next 3 lines")
+                debug_lines.append(f"  ❌ No gender found in next 5 lines")
             
             # Fix DOB year format
             if dob:
@@ -261,6 +331,9 @@ def extract_guests_from_police_report(pdf_bytes, debug=False):
             
             # Only add if we have a valid name
             if guest_name and len(guest_name) > 1:
+                # Determine document number for display
+                doc_number = id_card_number if document_type == 'IDC' else passport
+                
                 guest_entry = {
                     'room': room_num,
                     'name': guest_name,
@@ -268,13 +341,25 @@ def extract_guests_from_police_report(pdf_bytes, debug=False):
                     'departure_date': departure_date,
                     'nationality': nationality,
                     'passport': passport,
+                    'id_card': id_card_number,
+                    'document_type': document_type or 'Unknown',
+                    'doc_number': doc_number,  # Unified field
                     'dob': dob,
-                    'gender': gender or 'Unknown'
+                    'gender': gender or 'Unknown',
+                    # Excel export fields (only used for IDC guests)
+                    'loai_giay_to': DEFAULT_VN_GUEST['loai_giay_to'] if document_type == 'IDC' else '4 - Hộ chiếu',
+                    'noi_cu_tru': DEFAULT_VN_GUEST['noi_cu_tru'],
+                    'tinh_thanh': DEFAULT_VN_GUEST['tinh_thanh'],
+                    'phuong_xa': DEFAULT_VN_GUEST['phuong_xa'],
+                    'dia_chi_chi_tiet': DEFAULT_VN_GUEST['dia_chi_chi_tiet'],
+                    'ly_do_cu_tru': DEFAULT_VN_GUEST['ly_do_cu_tru']
                 }
                 guests.append(guest_entry)
                 guest_counter += 1
                 if debug:
+                    doc_info = f"IDC: {id_card_number}" if document_type == 'IDC' else f"PAS: {passport}" if passport else "No document"
                     debug_lines.append(f"  ✅ Added guest #{guest_counter}: {guest_name} (Room {room_num})")
+                    debug_lines.append(f"     Document: {doc_info}")
                     debug_lines.append(f"     Data: {guest_entry}")
             else:
                 if debug:
@@ -292,16 +377,19 @@ def extract_guests_from_police_report(pdf_bytes, debug=False):
         
         # Summary statistics
         st.markdown("### 📊 Extraction Summary")
-        col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+        col_d1, col_d2, col_d3, col_d4, col_d5 = st.columns(5)
         with col_d1:
             st.metric("Total Guests Found", len(guests))
         with col_d2:
             found_passport = sum(1 for g in guests if g.get('passport'))
             st.metric("Has Passport", found_passport)
         with col_d3:
+            found_idc = sum(1 for g in guests if g.get('id_card'))
+            st.metric("Has ID Card", found_idc)
+        with col_d4:
             found_gender = sum(1 for g in guests if g.get('gender') != 'Unknown')
             st.metric("Has Gender", found_gender)
-        with col_d4:
+        with col_d5:
             found_dob = sum(1 for g in guests if g.get('dob'))
             st.metric("Has DOB", found_dob)
     
@@ -334,9 +422,8 @@ def format_date_for_xml(date_str):
     
     return date_str
 
-
 def generate_tam_tru_xml(guests, hotel_name="", hotel_address=""):
-    """Generate KHAI_BAO_TAM_TRU XML"""
+    """Generate KHAI_BAO_TAM_TRU XML for foreign guests"""
     root = ET.Element("KHAI_BAO_TAM_TRU")
     
     # Add hotel info
@@ -344,8 +431,11 @@ def generate_tam_tru_xml(guests, hotel_name="", hotel_address=""):
         hotel_elem = ET.SubElement(root, "THONG_TIN_KHACH_SAN")
         hotel_elem.text = hotel_name
     
+    # Filter to only foreign guests (PAS holders)
+    foreign_guests = [g for g in guests if g.get('document_type') == 'PAS' or g.get('passport')]
+    
     # Add guest entries
-    for i, guest in enumerate(guests, 1):
+    for i, guest in enumerate(foreign_guests, 1):
         guest_elem = ET.SubElement(root, "THONG_TIN_KHACH")
         
         # Map nationality to 3-letter code
@@ -376,10 +466,78 @@ def generate_tam_tru_xml(guests, hotel_name="", hotel_address=""):
     dom = minidom.parseString(xml_str)
     return dom.toprettyxml(indent="  ")
 
+def export_to_excel(guests):
+    """
+    Export Vietnamese guests to the required Excel format
+    """
+    # Filter to only Vietnamese guests (IDC holders)
+    vn_guests = [g for g in guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+    
+    if not vn_guests:
+        return pd.DataFrame()
+    
+    excel_data = []
+    for idx, guest in enumerate(vn_guests, 1):
+        # Format date fields
+        arrival = guest.get('arrival_date', '')
+        departure = guest.get('departure_date', '')
+        dob = guest.get('dob', '')
+        
+        # Convert dates to dd/mm/yyyy format
+        for date_field, val in [('arrival', arrival), ('departure', departure), ('dob', dob)]:
+            if val:
+                for fmt in ['%d/%m/%y', '%d/%m/%Y']:
+                    try:
+                        dt = datetime.strptime(val, fmt)
+                        if date_field == 'dob':
+                            dob = dt.strftime('%d/%m/%Y')
+                        elif date_field == 'arrival':
+                            arrival = dt.strftime('%d/%m/%Y')
+                        else:
+                            departure = dt.strftime('%d/%m/%Y')
+                        break
+                    except:
+                        pass
+        
+        # Map gender
+        gender_map = {'M': 'M - Nam', 'F': 'F - Nữ'}
+        gender = gender_map.get(guest.get('gender', ''), '')
+        
+        # Map nationality
+        nationality = guest.get('nationality', '')
+        if nationality in COUNTRY_CODE_MAP:
+            nationality = f"{COUNTRY_CODE_MAP[nationality]} - {get_country_name(COUNTRY_CODE_MAP[nationality])}"
+        else:
+            nationality = f"VNM - Viet Nam"
+        
+        row = {
+            'STT': idx,
+            'HỌ TÊN (*)': guest.get('name', ''),
+            'NGÀY SINH (*)': dob,
+            'GIỚI TÍNH (*)': gender,
+            'QUỐC TỊCH (*)': nationality,
+            'LOẠI GIẤY TỜ (*)': guest.get('loai_giay_to', DEFAULT_VN_GUEST['loai_giay_to']),
+            'TÊN GIẤY TỜ': '',  # Only for "Giấy Tờ Khác"
+            'SỐ GIẤY TỜ (*)': guest.get('id_card', ''),
+            'SỐ ĐIỆN THOẠI': '',  # Not extracted from PDF
+            'NƠI CƯ TRÚ HIỆN NAY': guest.get('noi_cu_tru', DEFAULT_VN_GUEST['noi_cu_tru']),
+            'TỈNH/ THÀNH PHỐ': guest.get('tinh_thanh', DEFAULT_VN_GUEST['tinh_thanh']),
+            'PHƯỜNG/ XÃ/ ĐẶC KHU': guest.get('phuong_xa', DEFAULT_VN_GUEST['phuong_xa']),
+            'ĐỊA CHỈ CHI TIẾT': guest.get('dia_chi_chi_tiet', DEFAULT_VN_GUEST['dia_chi_chi_tiet']),
+            'NGÀY ĐẾN (*)': arrival,
+            'NGÀY ĐI DỰ KIẾN (*)': departure,
+            'SỐ PHÒNG/ KHOA': guest.get('room', ''),
+            'LÝ DO CƯ TRÚ (*)': guest.get('ly_do_cu_tru', DEFAULT_VN_GUEST['ly_do_cu_tru']),
+            'NHẬP LÝ DO': '',  # Only for "Mục đích khác"
+            'GHI CHÚ': ''
+        }
+        excel_data.append(row)
+    
+    return pd.DataFrame(excel_data)
 
 def display_police_report_converter(pdf_bytes):
-    """Main function for Police Report to XML Converter with Tabs"""
-    st.subheader("📄 Police Report to KHAI_BAO_TAM_TRU XML")
+    """Main function for Police Report to XML/Excel Converter"""
+    st.subheader("📄 Police Report to XML/Excel Converter")
     
     # Debug toggle
     debug_mode = st.checkbox("🔍 Enable Debug Mode", value=False, help="Shows detailed extraction process")
@@ -387,8 +545,6 @@ def display_police_report_converter(pdf_bytes):
     # Show PDF preview
     with st.expander("📄 View Original PDF", expanded=False):
         display_pdf_preview(pdf_bytes, height=400)
-    
-    
     
     # Extract data
     with st.spinner("Extracting guest data from PDF..."):
@@ -398,8 +554,8 @@ def display_police_report_converter(pdf_bytes):
         st.warning("No guest data found in the PDF. Please check the format.")
         return
     
-    # ========== THREE TABS ==========
-    tab1, tab2, tab3 = st.tabs(["📋 Guest List", "✏️ Edit Guest Data", "🏨 Hotel Overview"])
+    # ========== FOUR TABS ==========
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Guest List", "✏️ Edit Guest Data", "🏨 Hotel Overview", "📥 Export"])
     
     # ========== TAB 1: Guest List ==========
     with tab1:
@@ -409,13 +565,17 @@ def display_police_report_converter(pdf_bytes):
         # Prepare data for display
         guest_data = []
         for idx, guest in enumerate(guests):
+            doc_type = guest.get('document_type', '')
+            doc_number = guest.get('doc_number', '') or guest.get('id_card', '') or guest.get('passport', '')
+            
             guest_data.append({
                 "#": idx + 1,
                 "Room": guest.get('room', ''),
                 "Guest Name": guest.get('name', '')[:50],
                 "Arrival": guest.get('arrival_date', 'N/A'),
                 "Departure": guest.get('departure_date', 'N/A'),
-                "Passport": guest.get('passport', 'N/A'),
+                "Document Type": doc_type if doc_type else 'N/A',
+                "Document #": doc_number if doc_number else 'N/A',
                 "DOB": guest.get('dob', 'N/A'),
                 "Nationality": guest.get('nationality', 'N/A'),
                 "Gender": guest.get('gender', 'N/A')
@@ -442,31 +602,11 @@ def display_police_report_converter(pdf_bytes):
                 f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 "application/json"
             )
-        
-        # ===== XML PREVIEW =====
-        st.markdown("---")
-        st.markdown("### 📄 XML Preview")
-        st.caption("Preview of the first 3 guests in XML format")
-        
-        # Show XML preview for first 3 guests
-        preview_guests = guests[:3]
-        preview_xml = generate_tam_tru_xml(preview_guests, "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
-        st.code(preview_xml, language="xml")
-        
-        # Download full XML
-        if st.button("📥 Download Full XML", use_container_width=True):
-            full_xml = generate_tam_tru_xml(guests, "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
-            st.download_button(
-                label="📥 Download XML",
-                data=full_xml,
-                file_name=f"KHAI_BAO_TAM_TRU_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml",
-                mime="application/xml",
-                use_container_width=True
-            )
+    
     # ========== TAB 2: Edit Guest Data ==========
     with tab2:
         st.subheader("✏️ Edit Guest Data")
-        st.caption("Make corrections to guest information below before generating XML.")
+        st.caption("Make corrections to guest information below before generating XML or Excel.")
         
         edited_guests = []
         for i, guest in enumerate(guests):
@@ -480,7 +620,16 @@ def display_police_report_converter(pdf_bytes):
                 
                 with col2:
                     departure = st.text_input(f"Departure Date {i+1}", value=guest.get('departure_date', ''))
-                    passport = st.text_input(f"Passport {i+1}", value=guest.get('passport', ''))
+                    
+                    doc_type = guest.get('document_type', '')
+                    if doc_type == 'IDC':
+                        doc_label = "ID Card Number"
+                        default_doc = guest.get('id_card', '')
+                    else:
+                        doc_label = "Passport Number"
+                        default_doc = guest.get('passport', '')
+                    
+                    doc_number = st.text_input(f"{doc_label} {i+1}", value=default_doc)
                     dob = st.text_input(f"Date of Birth {i+1}", value=guest.get('dob', ''))
                 
                 with col3:
@@ -493,58 +642,163 @@ def display_police_report_converter(pdf_bytes):
                         index=0 if guest.get('gender') == 'Unknown' else (1 if guest.get('gender') == 'M' else 2)
                     )
                 
-                edited_guests.append({
+                edited_guest = {
                     'room': room,
                     'name': name,
                     'arrival_date': arrival,
                     'departure_date': departure,
-                    'passport': passport,
+                    'passport': doc_number if doc_type != 'IDC' else guest.get('passport', ''),
+                    'id_card': doc_number if doc_type == 'IDC' else guest.get('id_card', ''),
+                    'document_type': doc_type,
+                    'doc_number': doc_number,
                     'dob': dob,
                     'nationality': nationality_val,
-                    'gender': gender
-                })
-        
-        # Hotel info
-        st.markdown("---")
-        st.markdown("### 🏨 Hotel Information")
-        col_h1, col_h2 = st.columns(2)
-        with col_h1:
-            hotel_name = st.text_input("Hotel Name", value="Novotel Suites Hanoi")
-        with col_h2:
-            hotel_address = st.text_input("Hotel Address", value="5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
-        
-        # Generate XML
-        st.markdown("---")
-        if st.button("📄 Generate KHAI_BAO_TAM_TRU XML", type="primary", use_container_width=True):
-            with st.spinner("Generating XML..."):
-                final_guests = edited_guests if edited_guests else guests
-                xml_output = generate_tam_tru_xml(final_guests, hotel_name, hotel_address)
-                
-                st.markdown("### 📄 Generated XML")
-                st.code(xml_output, language="xml")
-                
-                col_d1, col_d2 = st.columns(2)
-                with col_d1:
-                    st.download_button(
-                        label="📥 Download XML",
-                        data=xml_output,
-                        file_name=f"KHAI_BAO_TAM_TRU_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml",
-                        mime="application/xml",
-                        use_container_width=True
-                    )
-                with col_d2:
-                    json_output = json.dumps(final_guests, indent=2, default=str)
-                    st.download_button(
-                        label="📥 Download JSON",
-                        data=json_output,
-                        file_name=f"guest_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json",
-                        use_container_width=True
-                    )
+                    'gender': gender,
+                    'loai_giay_to': DEFAULT_VN_GUEST['loai_giay_to'] if doc_type == 'IDC' else '4 - Hộ chiếu',
+                    'noi_cu_tru': guest.get('noi_cu_tru', DEFAULT_VN_GUEST['noi_cu_tru']),
+                    'tinh_thanh': guest.get('tinh_thanh', DEFAULT_VN_GUEST['tinh_thanh']),
+                    'phuong_xa': guest.get('phuong_xa', DEFAULT_VN_GUEST['phuong_xa']),
+                    'dia_chi_chi_tiet': guest.get('dia_chi_chi_tiet', DEFAULT_VN_GUEST['dia_chi_chi_tiet']),
+                    'ly_do_cu_tru': guest.get('ly_do_cu_tru', DEFAULT_VN_GUEST['ly_do_cu_tru'])
+                }
+                edited_guests.append(edited_guest)
     
     # ========== TAB 3: Hotel Overview ==========
     with tab3:
         display_hotel_overview_tab(guests)
+    
+    # ========== TAB 4: Export ==========
+    with tab4:
+        st.subheader("📥 Export Options")
+        st.caption("Export data based on guest type")
+        
+        # Separate guests by type
+        foreign_guests = [g for g in guests if g.get('document_type') == 'PAS' or g.get('passport')]
+        vn_guests = [g for g in guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+        
+        col_exp1, col_exp2 = st.columns(2)
+        
+        with col_exp1:
+            st.markdown("### 🌍 Foreign Guests")
+            st.metric("Count", len(foreign_guests))
+            
+            if foreign_guests:
+                # XML preview
+                st.markdown("#### XML Preview")
+                preview_xml = generate_tam_tru_xml(foreign_guests[:3], "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
+                st.code(preview_xml, language="xml")
+                
+                # Download XML
+                if st.button("📥 Download XML for Foreign Guests", use_container_width=True):
+                    full_xml = generate_tam_tru_xml(foreign_guests, "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
+                    st.download_button(
+                        label="📥 Download XML",
+                        data=full_xml,
+                        file_name=f"KHAI_BAO_TAM_TRU_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml",
+                        mime="application/xml",
+                        use_container_width=True
+                    )
+            else:
+                st.info("No foreign guests found")
+        
+        with col_exp2:
+            st.markdown("### 🇻🇳 Vietnamese Guests")
+            st.metric("Count", len(vn_guests))
+            
+            if vn_guests:
+                # Allow editing of default values
+                st.markdown("#### Default Values")
+                default_noi_cu_tru = st.selectbox(
+                    "Nơi cư trú hiện nay",
+                    ["1 - Thường trú", "2 - Tạm trú", "3 - Khác"],
+                    index=1,
+                    key="noi_cu_tru_export"
+                )
+                default_tinh_thanh = st.selectbox(
+                    "Tỉnh/Thành phố",
+                    ["101 - TP. Hà Nội", "501 - TP. Đà Nẵng", "701 - TP. Hồ Chí Minh"],
+                    index=0,
+                    key="tinh_thanh_export"
+                )
+                default_phuong_xa = st.selectbox(
+                    "Phường/Xã",
+                    ["101900167 - Phường Cầu Giấy", "101900070 - Phường Hoàn Kiếm", "101900160 - Phường Nghĩa Đô"],
+                    index=0,
+                    key="phuong_xa_export"
+                )
+                default_dia_chi = st.text_input("Địa chỉ chi tiết", value="Số 5 Duy Tân", key="dia_chi_export")
+                default_ly_do = st.selectbox(
+                    "Lý do cư trú",
+                    ["1 - Du lịch", "2 - Công tác", "3 - Học tập", "4 - Thăm viếng", "20 - Mục đích khác"],
+                    index=0,
+                    key="ly_do_export"
+                )
+                
+                # Update guest records with user-selected defaults
+                export_guests = []
+                for guest in vn_guests:
+                    guest_copy = guest.copy()
+                    guest_copy['noi_cu_tru'] = default_noi_cu_tru
+                    guest_copy['tinh_thanh'] = default_tinh_thanh
+                    guest_copy['phuong_xa'] = default_phuong_xa
+                    guest_copy['dia_chi_chi_tiet'] = default_dia_chi
+                    guest_copy['ly_do_cu_tru'] = default_ly_do
+                    export_guests.append(guest_copy)
+                
+                # Preview Excel data
+                st.markdown("#### Excel Preview")
+                df_excel = export_to_excel(export_guests)
+                if not df_excel.empty:
+                    st.dataframe(df_excel, use_container_width=True, height=300)
+                
+                # Download Excel
+                if st.button("📥 Download Excel for Vietnamese Guests", type="primary", use_container_width=True):
+                    with st.spinner("Generating Excel file..."):
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df_excel.to_excel(writer, sheet_name='DS_KHACH_VIET_NAM_LUU_TRU', index=False)
+                            
+                            workbook = writer.book
+                            worksheet = writer.sheets['DS_KHACH_VIET_NAM_LUU_TRU']
+                            
+                            # Add header formatting
+                            for cell in worksheet[1]:
+                                cell.font = Font(bold=True)
+                                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                            
+                            # Auto-adjust column widths
+                            for column in worksheet.columns:
+                                max_length = 0
+                                column_letter = column[0].column_letter
+                                for cell in column:
+                                    try:
+                                        if len(str(cell.value)) > max_length:
+                                            max_length = len(str(cell.value))
+                                    except:
+                                        pass
+                                adjusted_width = min(max_length + 2, 30)
+                                worksheet.column_dimensions[column_letter].width = adjusted_width
+                        
+                        st.download_button(
+                            label="📥 Download Excel File",
+                            data=output.getvalue(),
+                            file_name=f"DS_KHACH_LUU_TRU_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+            else:
+                st.info("No Vietnamese guests found")
+        
+        # Combined statistics
+        st.markdown("---")
+        st.markdown("### 📊 Summary")
+        col_sum1, col_sum2, col_sum3 = st.columns(3)
+        with col_sum1:
+            st.metric("Total Guests", len(guests))
+        with col_sum2:
+            st.metric("Foreign (XML)", len(foreign_guests))
+        with col_sum3:
+            st.metric("Vietnamese (Excel)", len(vn_guests))
 
 def create_floor_map(guests, selected_floor=None):
     """
@@ -580,13 +834,10 @@ def create_floor_map(guests, selected_floor=None):
     
     return floors, occupied_rooms
 
-
 def display_floor_map(floors, occupied_rooms, selected_floor=None):
     """
     Display the floor map with color coding
     """
-    import streamlit as st
-    
     # Floor selection buttons
     st.markdown("### 🏢 Select Floor")
     
@@ -686,7 +937,6 @@ def display_floor_map(floors, occupied_rooms, selected_floor=None):
     
     else:
         st.info("👆 Click a floor above to view room details")
-
 
 def display_hotel_overview_tab(guests):
     """
