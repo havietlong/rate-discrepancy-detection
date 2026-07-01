@@ -18,6 +18,7 @@ import json
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
+from gsheets_manager import GuestDatabase
 
 # Country code mapping (2-letter → 3-letter)
 COUNTRY_CODE_MAP = {
@@ -59,6 +60,27 @@ DEFAULT_VN_GUEST = {
     'ly_do_cu_tru': '1 - Du lịch'
 }
 
+# Initialize session state for database connection
+if 'db_connected' not in st.session_state:
+    st.session_state.db_connected = False
+if 'db' not in st.session_state:
+    st.session_state.db = None
+if 'db_guests' not in st.session_state:
+    st.session_state.db_guests = pd.DataFrame()
+if 'db_stats' not in st.session_state:
+    st.session_state.db_stats = {}
+# Initialize session state for guests and export
+if 'extracted_guests' not in st.session_state:
+    st.session_state.extracted_guests = []
+if 'export_guests' not in st.session_state:
+    st.session_state.export_guests = []
+if 'export_foreign' not in st.session_state:
+    st.session_state.export_foreign = []
+if 'export_vn' not in st.session_state:
+    st.session_state.export_vn = []
+if 'switch_to_export' not in st.session_state:
+    st.session_state.switch_to_export = False
+
 def display_pdf_preview(pdf_bytes, height=400):
     """Display PDF preview"""
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -96,6 +118,290 @@ def get_country_name(code_3letter):
         'ZAF': 'South Africa'
     }
     return country_names.get(code_3letter, code_3letter)
+
+def connect_to_database():
+    """Connect to Google Sheets and load data"""
+    try:
+        with st.spinner("🔗 Connecting to Google Sheets..."):
+            from gsheets_manager import GuestDatabase
+            db = GuestDatabase()
+            
+            if db.conn:
+                # Try to get data
+                df = db.get_all_guests()
+                stats = db.get_statistics()
+                
+                # Set session state
+                st.session_state.db = db
+                st.session_state.db_guests = df
+                st.session_state.db_stats = stats
+                st.session_state.db_connected = True
+                
+                st.success(f"✅ Connected to Google Sheets! Loaded {stats['total']} guests.")
+                return True
+            else:
+                st.error("❌ Failed to connect to Google Sheets. Please check your configuration.")
+                st.session_state.db_connected = False
+                return False
+    except Exception as e:
+        st.error(f"❌ Connection error: {e}")
+        st.session_state.db_connected = False
+        return False
+
+def disconnect_database():
+    """Disconnect from Google Sheets"""
+    st.session_state.db = None
+    st.session_state.db_guests = pd.DataFrame()
+    st.session_state.db_stats = {}
+    st.session_state.db_connected = False
+    st.success("🔌 Disconnected from Google Sheets")
+
+def display_database_status():
+    """Display database connection status in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📊 Google Sheets Database")
+        
+        # Check current status
+        is_connected = st.session_state.get('db_connected', False)
+        
+        # Toggle for enabling/disabling database
+        enable_db = st.checkbox(
+            "🔗 Enable Google Sheet Data",
+            value=is_connected,
+            help="Connect to Google Sheets to store and retrieve guest data"
+        )
+        
+        # Handle connection/disconnection
+        if enable_db and not is_connected:
+            # User wants to connect
+            with st.spinner("Connecting..."):
+                success = connect_to_database()
+                if success:
+                    st.rerun()
+        elif not enable_db and is_connected:
+            # User wants to disconnect
+            disconnect_database()
+            st.rerun()
+        
+        # Show status if connected
+        if st.session_state.get('db_connected', False):
+            stats = st.session_state.get('db_stats', {})
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Guests", stats.get('total', 0))
+            with col2:
+                st.metric("Active", stats.get('active', 0))
+            
+            st.caption(f"🔄 Last updated: {datetime.now().strftime('%H:%M:%S')}")
+            
+            if st.button("🔄 Refresh Data", use_container_width=True):
+                connect_to_database()
+                st.rerun()
+        else:
+            st.caption("💡 Toggle above to connect to Google Sheets")
+
+def compare_with_database(guests):
+    """Compare extracted guests with database and show results"""
+    if not st.session_state.db_connected:
+        st.warning("⚠️ Please enable Google Sheets connection first.")
+        return
+    
+    db = st.session_state.db
+    
+    with st.spinner("Comparing with database..."):
+        new_guests, existing_guests = db.compare_with_extracted(guests)
+    
+    # Show results - FULL WIDTH (no columns)
+    st.markdown("### 📊 Comparison Results")
+    
+    # Use metrics in a single row with full width
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("📄 Total Extracted", len(guests))
+    with col2:
+        st.metric("✅ Already in Database", len(existing_guests))
+    with col3:
+        st.metric("🆕 New Guests", len(new_guests))
+    
+    # Show new guests in full width
+    if new_guests:
+        st.success(f"🆕 Found {len(new_guests)} new guests not in database")
+        
+        # Show new guests with full width
+        new_df = pd.DataFrame(new_guests)
+        st.dataframe(new_df[['room', 'name', 'nationality', 'passport', 'arrival_date', 'departure_date']], 
+                     use_container_width=True)
+        
+        # Buttons for adding and exporting
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
+        with col_btn1:
+            if st.button(f"📥 Add {len(new_guests)} New Guests to Database", use_container_width=True):
+                save_to_database(new_guests)
+                st.success(f"✅ Added {len(new_guests)} guests to database!")
+               
+        
+        with col_btn2:
+            # Separate new guests by type for export
+            new_foreign = [g for g in new_guests if g.get('document_type') == 'PAS' or g.get('passport')]
+            new_vn = [g for g in new_guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+            
+            if st.button(f"📤 Export {len(new_guests)} New Guests", use_container_width=True):
+                # Store in session state for export tab
+                st.session_state.export_guests = new_guests
+                st.session_state.export_foreign = new_foreign
+                st.session_state.export_vn = new_vn
+                st.session_state.switch_to_export = True
+                # NO st.rerun() - just show a message
+                st.success(f"✅ {len(new_guests)} guests ready for export! Click on the '📥 Export' tab above.")
+        
+        with col_btn3:
+            if st.button("📤 Go to Export Tab", use_container_width=True):
+                # Store guests for export
+                st.session_state.export_guests = new_guests
+                st.session_state.export_foreign = [g for g in new_guests if g.get('document_type') == 'PAS' or g.get('passport')]
+                st.session_state.export_vn = [g for g in new_guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+                st.session_state.switch_to_export = True
+                # NO st.rerun() - just show a message
+                st.success("✅ Guests ready for export! Click on the '📥 Export' tab above.")
+    else:
+        st.info("✅ All guests are already in the database!")
+    
+    # Show existing guests in full width
+    if existing_guests:
+        with st.expander(f"📋 {len(existing_guests)} Guests Already in Database"):
+            existing_df = pd.DataFrame(existing_guests)
+            st.dataframe(existing_df[['room', 'name', 'nationality', 'passport', 'arrival_date', 'departure_date']], 
+                         use_container_width=True)
+
+def test_gsheets_connection():
+    """Test Google Sheets connection and display diagnostic info"""
+    st.subheader("🔧 Google Sheets Connection Test")
+    
+    # Check if secrets exist
+    st.markdown("### 📋 Configuration Check")
+    
+    try:
+        # Check if secrets file exists
+        import os
+        secrets_path = ".streamlit/secrets.toml"
+        if os.path.exists(secrets_path):
+            st.success("✅ secrets.toml file found")
+        else:
+            st.error("❌ secrets.toml file not found at .streamlit/secrets.toml")
+    except Exception as e:
+        st.error(f"❌ Error checking secrets: {e}")
+    
+    # Try to connect
+    st.markdown("### 🔗 Connection Test")
+    
+    try:
+        from gsheets_manager import GuestDatabase
+        import pandas as pd
+        
+        with st.spinner("Attempting to connect..."):
+            db = GuestDatabase()
+            
+            if db.conn:
+                st.success("✅ Successfully connected to Google Sheets!")
+                
+                # Try to read data
+                try:
+                    df = db.get_all_guests()
+                    st.success(f"✅ Successfully read data! Found {len(df)} rows")
+                    
+                    # Show data preview
+                    st.markdown("### 📊 Data Preview (First 5 rows)")
+                    if not df.empty:
+                        st.dataframe(df.head(5), use_container_width=True)
+                        
+                        # Show column info
+                        st.markdown("### 📋 Column Info")
+                        col_info = pd.DataFrame({
+                            'Column': df.columns,
+                            'Type': df.dtypes.astype(str),
+                            'Non-Null': df.count().values,
+                            'Null %': (df.isnull().sum() / len(df) * 100).round(2).values
+                        })
+                        st.dataframe(col_info, use_container_width=True)
+                    else:
+                        st.info("📭 The spreadsheet is empty (no data)")
+                        
+                        # Test writing
+                        st.markdown("### ✍️ Write Test")
+                        if st.button("Write Test Row"):
+                            test_data = {
+                                'guest_id': 'TEST001',
+                                'name': 'Test Guest',
+                                'room': '9999',
+                                'arrival_date': '01/01/2024',
+                                'departure_date': '02/01/2024',
+                                'nationality': 'VN',
+                                'document_type': 'IDC',
+                                'doc_number': '123456789',
+                                'is_active': 'True',
+                                'check_in_timestamp': '2024-01-01 10:00:00',
+                                'check_out_timestamp': '',
+                                'gender': 'M',
+                                'passport': '',
+                                'id_card': '123456789',
+                                'dob': '01/01/1990',
+                                'noi_cu_tru': '2 - Tạm trú',
+                                'tinh_thanh': '101 - TP. Hà Nội',
+                                'phuong_xa': '101900167 - Phường Cầu Giấy',
+                                'dia_chi_chi_tiet': 'Số 5 Duy Tân',
+                                'ly_do_cu_tru': '1 - Du lịch'
+                            }
+                            
+                            try:
+                                # Create a new df with the test data
+                                test_df = pd.DataFrame([test_data])
+                                
+                                # Try to append to existing sheet
+                                if not df.empty:
+                                    combined = pd.concat([df, test_df], ignore_index=True)
+                                    db.conn.write(worksheet=db.worksheet_name, data=combined)
+                                    st.success("✅ Test row written successfully!")
+                                    
+                                    # Read back to verify
+                                    verify_df = db.get_all_guests()
+                                    st.info(f"📊 Sheet now has {len(verify_df)} rows")
+                                    st.dataframe(verify_df.tail(3), use_container_width=True)
+                                    
+                                    # Clean up - remove test row
+                                    if st.button("🗑️ Remove Test Row"):
+                                        clean_df = verify_df[verify_df['guest_id'] != 'TEST001']
+                                        db.conn.write(worksheet=db.worksheet_name, data=clean_df)
+                                        st.success("✅ Test row removed!")
+                                        st.rerun()
+                                else:
+                                    # Sheet is empty, just write test data
+                                    db.conn.write(worksheet=db.worksheet_name, data=test_df)
+                                    st.success("✅ Test row written to empty sheet!")
+                                    
+                            except Exception as e:
+                                st.error(f"❌ Write test failed: {e}")
+                except Exception as e:
+                    st.error(f"❌ Failed to read data: {e}")
+            else:
+                st.error("❌ Failed to connect - db.conn is None")
+                st.info("💡 Check your secrets.toml configuration")
+                
+                # Show what's in secrets (safely)
+                st.markdown("### 🔍 Secrets Status")
+                try:
+                    from streamlit import secrets
+                    st.write("Secret keys present:", list(secrets.get('connections', {}).get('gsheets', {}).keys()))
+                except:
+                    st.warning("Could not read secrets")
+                    
+    except ImportError as e:
+        st.error(f"❌ Import error: {e}")
+        st.info("Make sure you have installed: pip install st-gsheets-connection")
+    except Exception as e:
+        st.error(f"❌ Unexpected error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 def extract_guests_from_police_report(pdf_bytes, debug=False):
     """
@@ -535,9 +841,110 @@ def export_to_excel(guests):
     
     return pd.DataFrame(excel_data)
 
+def save_to_database(guests):
+    """Save extracted guests to the database"""
+    if not st.session_state.db_connected:
+        st.warning("⚠️ Please enable Google Sheets connection first.")
+        return
+    
+    db = st.session_state.db
+    
+    # Get existing guests
+    existing_df = db.get_all_guests()
+    
+    new_guests = []
+    duplicates = []
+    
+    for guest in guests:
+        # Check if guest already exists (by room and name)
+        if not existing_df.empty:
+            mask = (existing_df['room'] == guest['room']) & (existing_df['name'] == guest['name'])
+            if mask.any():
+                # Check if they're already active
+                if existing_df[mask]['is_active'].iloc[0] == 'True':
+                    duplicates.append(guest)
+                    continue
+        
+        # Prepare guest data for database
+        guest_data = {
+            'room': guest.get('room', ''),
+            'name': guest.get('name', ''),
+            'arrival_date': guest.get('arrival_date', ''),
+            'departure_date': guest.get('departure_date', ''),
+            'nationality': guest.get('nationality', ''),
+            'passport': guest.get('passport', ''),
+            'id_card': guest.get('id_card', ''),
+            'document_type': guest.get('document_type', ''),
+            'doc_number': guest.get('doc_number', ''),
+            'dob': guest.get('dob', ''),
+            'gender': guest.get('gender', ''),
+            'noi_cu_tru': guest.get('noi_cu_tru', DEFAULT_VN_GUEST['noi_cu_tru']),
+            'tinh_thanh': guest.get('tinh_thanh', DEFAULT_VN_GUEST['tinh_thanh']),
+            'phuong_xa': guest.get('phuong_xa', DEFAULT_VN_GUEST['phuong_xa']),
+            'dia_chi_chi_tiet': guest.get('dia_chi_chi_tiet', DEFAULT_VN_GUEST['dia_chi_chi_tiet']),
+            'ly_do_cu_tru': guest.get('ly_do_cu_tru', DEFAULT_VN_GUEST['ly_do_cu_tru'])
+        }
+        new_guests.append(guest_data)
+    
+    if new_guests:
+        success_count, failed = db.add_multiple_guests(new_guests)
+        # Refresh data
+        connect_to_database()
+        st.success(f"✅ Added {success_count} new guests to database")
+        if duplicates:
+            st.info(f"ℹ️ Skipped {len(duplicates)} duplicate guests (already active)")
+        if failed:
+            st.warning(f"⚠️ Failed to add {len(failed)} guests")
+    else:
+        st.info("ℹ️ No new guests to add")
+
+def check_export_flag():
+    """Check if there are guests waiting to be exported"""
+    if st.session_state.get('switch_to_export', False):
+        st.session_state.switch_to_export = False
+        # Find the export tab and switch to it
+        # We'll handle this in the display function
+        return True
+    return False
+
 def display_police_report_converter(pdf_bytes):
     """Main function for Police Report to XML/Excel Converter"""
     st.subheader("📄 Police Report to XML/Excel Converter")
+    
+    # ===== DATABASE CONNECTION SECTION =====
+    st.markdown("### 📊 Google Sheets Database")
+    
+    # Check current connection status
+    is_connected = st.session_state.get('db_connected', False)
+    
+    col_db1, col_db2, col_db3 = st.columns([1, 2, 1])
+    with col_db1:
+        if not is_connected:
+            if st.button("🔗 Connect to Google Sheets", type="primary", use_container_width=True):
+                with st.spinner("Connecting..."):
+                    success = connect_to_database()
+                    if success:
+                        st.rerun()
+        else:
+            if st.button("🔌 Disconnect", use_container_width=True):
+                disconnect_database()
+                st.rerun()
+    
+    with col_db2:
+        if is_connected:
+            stats = st.session_state.get('db_stats', {})
+            st.success(f"✅ Connected! Loaded {stats.get('total', 0)} guests")
+        else:
+            st.info("💡 Click 'Connect to Google Sheets' to load guest data")
+    
+    with col_db3:
+        if is_connected:
+            if st.button("🔄 Refresh", use_container_width=True):
+                connect_to_database()
+                st.rerun()
+    
+    
+    # ===== END DATABASE CONNECTION SECTION =====
     
     # Debug toggle
     debug_mode = st.checkbox("🔍 Enable Debug Mode", value=False, help="Shows detailed extraction process")
@@ -546,16 +953,26 @@ def display_police_report_converter(pdf_bytes):
     with st.expander("📄 View Original PDF", expanded=False):
         display_pdf_preview(pdf_bytes, height=400)
     
-    # Extract data
-    with st.spinner("Extracting guest data from PDF..."):
-        guests = extract_guests_from_police_report(pdf_bytes, debug=debug_mode)
+    # Extract data - store in session state
+    if 'extracted_guests' not in st.session_state or not st.session_state.extracted_guests:
+        with st.spinner("Extracting guest data from PDF..."):
+            guests = extract_guests_from_police_report(pdf_bytes, debug=debug_mode)
+            st.session_state.extracted_guests = guests
+    else:
+        guests = st.session_state.extracted_guests
     
     if not guests:
         st.warning("No guest data found in the PDF. Please check the format.")
         return
     
-    # ========== FOUR TABS ==========
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Guest List", "✏️ Edit Guest Data", "🏨 Hotel Overview", "📥 Export"])
+    # ========== FIVE TABS ==========
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 Guest List", 
+        "✏️ Edit Guest Data", 
+        "🏨 Hotel Overview", 
+        "📥 Export",
+        "📊 Database"
+    ])
     
     # ========== TAB 1: Guest List ==========
     with tab1:
@@ -602,6 +1019,20 @@ def display_police_report_converter(pdf_bytes):
                 f"guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 "application/json"
             )
+        
+        st.markdown("---")
+        st.markdown("### 🔍 Database Comparison")
+        
+        if st.session_state.db_connected:
+            col_comp1, col_comp2 = st.columns(2)
+            with col_comp1:
+                if st.button("🔍 Compare with Database", use_container_width=True):
+                    compare_with_database(guests)
+            with col_comp2:
+                if st.button("💾 Save All to Database", use_container_width=True):
+                    save_to_database(guests)
+        else:
+            st.info("💡 Enable Google Sheets connection to compare with database.")
     
     # ========== TAB 2: Edit Guest Data ==========
     with tab2:
@@ -672,9 +1103,36 @@ def display_police_report_converter(pdf_bytes):
         st.subheader("📥 Export Options")
         st.caption("Export data based on guest type")
         
-        # Separate guests by type
-        foreign_guests = [g for g in guests if g.get('document_type') == 'PAS' or g.get('passport')]
-        vn_guests = [g for g in guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+        # Check if there are guests waiting to be exported
+        export_guests = st.session_state.get('export_guests', [])
+        
+        if export_guests:
+            st.success(f"📤 {len(export_guests)} guests ready for export from comparison!")
+            # Use the stored guests
+            foreign_guests = st.session_state.get('export_foreign', [])
+            vn_guests = st.session_state.get('export_vn', [])
+            
+            # Show a button to clear the export list
+            if st.button("🔄 Clear Export List & Show All Guests", use_container_width=True):
+                st.session_state.export_guests = []
+                st.session_state.export_foreign = []
+                st.session_state.export_vn = []
+                st.session_state.switch_to_export = False
+                st.rerun()
+        else:
+            # Use the regular guests
+            export_guests = guests
+            foreign_guests = [g for g in guests if g.get('document_type') == 'PAS' or g.get('passport')]
+            vn_guests = [g for g in guests if g.get('document_type') == 'IDC' or g.get('id_card')]
+            
+            # Check if switch_to_export flag is set but no export_guests (fallback)
+            if st.session_state.get('switch_to_export', False):
+                st.session_state.switch_to_export = False
+                st.info("💡 Click 'Compare with Database' first, then use the 'Go to Export Tab' button.")
+        
+        # Clear the flag if it was set
+        if st.session_state.get('switch_to_export', False):
+            st.session_state.switch_to_export = False
         
         col_exp1, col_exp2 = st.columns(2)
         
@@ -683,12 +1141,10 @@ def display_police_report_converter(pdf_bytes):
             st.metric("Count", len(foreign_guests))
             
             if foreign_guests:
-                # XML preview
                 st.markdown("#### XML Preview")
                 preview_xml = generate_tam_tru_xml(foreign_guests[:3], "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
                 st.code(preview_xml, language="xml")
                 
-                # Download XML
                 if st.button("📥 Download XML for Foreign Guests", use_container_width=True):
                     full_xml = generate_tam_tru_xml(foreign_guests, "Novotel Suites Hanoi", "5 Duy Tan, Cau Giay District, Hanoi, Vietnam")
                     st.download_button(
@@ -706,7 +1162,6 @@ def display_police_report_converter(pdf_bytes):
             st.metric("Count", len(vn_guests))
             
             if vn_guests:
-                # Allow editing of default values
                 st.markdown("#### Default Values")
                 default_noi_cu_tru = st.selectbox(
                     "Nơi cư trú hiện nay",
@@ -734,8 +1189,7 @@ def display_police_report_converter(pdf_bytes):
                     key="ly_do_export"
                 )
                 
-                # Update guest records with user-selected defaults
-                export_guests = []
+                export_guests_vn = []
                 for guest in vn_guests:
                     guest_copy = guest.copy()
                     guest_copy['noi_cu_tru'] = default_noi_cu_tru
@@ -743,15 +1197,13 @@ def display_police_report_converter(pdf_bytes):
                     guest_copy['phuong_xa'] = default_phuong_xa
                     guest_copy['dia_chi_chi_tiet'] = default_dia_chi
                     guest_copy['ly_do_cu_tru'] = default_ly_do
-                    export_guests.append(guest_copy)
+                    export_guests_vn.append(guest_copy)
                 
-                # Preview Excel data
                 st.markdown("#### Excel Preview")
-                df_excel = export_to_excel(export_guests)
+                df_excel = export_to_excel(export_guests_vn)
                 if not df_excel.empty:
                     st.dataframe(df_excel, use_container_width=True, height=300)
                 
-                # Download Excel
                 if st.button("📥 Download Excel for Vietnamese Guests", type="primary", use_container_width=True):
                     with st.spinner("Generating Excel file..."):
                         output = BytesIO()
@@ -761,12 +1213,10 @@ def display_police_report_converter(pdf_bytes):
                             workbook = writer.book
                             worksheet = writer.sheets['DS_KHACH_VIET_NAM_LUU_TRU']
                             
-                            # Add header formatting
                             for cell in worksheet[1]:
                                 cell.font = Font(bold=True)
                                 cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
                             
-                            # Auto-adjust column widths
                             for column in worksheet.columns:
                                 max_length = 0
                                 column_letter = column[0].column_letter
@@ -789,16 +1239,65 @@ def display_police_report_converter(pdf_bytes):
             else:
                 st.info("No Vietnamese guests found")
         
-        # Combined statistics
         st.markdown("---")
         st.markdown("### 📊 Summary")
         col_sum1, col_sum2, col_sum3 = st.columns(3)
         with col_sum1:
-            st.metric("Total Guests", len(guests))
+            st.metric("Total Guests", len(export_guests))
         with col_sum2:
             st.metric("Foreign (XML)", len(foreign_guests))
         with col_sum3:
             st.metric("Vietnamese (Excel)", len(vn_guests))
+    
+    # ========== TAB 5: Database ==========
+    with tab5:
+        if st.session_state.db_connected:
+            st.subheader("📊 Google Sheets Database")
+            
+            # Show database stats
+            stats = st.session_state.db_stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Guests", stats.get('total', 0))
+            with col2:
+                st.metric("Active Guests", stats.get('active', 0))
+            with col3:
+                st.metric("Rooms Occupied", stats.get('rooms_occupied', 0))
+            with col4:
+                st.metric("Last Updated", datetime.now().strftime('%H:%M'))
+            
+            st.markdown("---")
+            
+            # Show all guests from database
+            st.subheader("📋 Database Guests")
+            df = st.session_state.db_guests
+            if not df.empty:
+                # Select columns to display
+                display_cols = ['guest_id', 'name', 'room', 'arrival_date', 'departure_date', 
+                               'document_type', 'doc_number', 'is_active']
+                available_cols = [col for col in display_cols if col in df.columns]
+                st.dataframe(df[available_cols], use_container_width=True, height=400)
+                
+                # Export database
+                st.markdown("---")
+                col_exp_db1, col_exp_db2 = st.columns(2)
+                with col_exp_db1:
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download Database CSV",
+                        csv_data,
+                        f"database_guests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        "text/csv"
+                    )
+                with col_exp_db2:
+                    if st.button("🔄 Refresh Database", use_container_width=True):
+                        connect_to_database()
+                        st.rerun()
+            else:
+                st.info("No data in database")
+        else:
+            st.info("💡 Enable Google Sheets connection in the sidebar to view database")
+
 
 def create_floor_map(guests, selected_floor=None):
     """

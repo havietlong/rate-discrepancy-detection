@@ -11,8 +11,8 @@ import base64
 import os
 import fitz  # PyMuPDF
 from rate_parser import RateParser
-import police_report_converter
-
+import police_report_converter 
+from police_report_converter import display_database_status, connect_to_database, disconnect_database
 import guest_extractor
 
 rate_parser = RateParser("rate_patterns.json")
@@ -31,6 +31,15 @@ if 'training_data' not in st.session_state:
     st.session_state.training_data = {}
 if 'selected_room' not in st.session_state:
     st.session_state.selected_room = None
+# Initialize session state for database connection
+if 'db_connected' not in st.session_state:
+    st.session_state.db_connected = False
+if 'db' not in st.session_state:
+    st.session_state.db = None
+if 'db_guests' not in st.session_state:
+    st.session_state.db_guests = pd.DataFrame()
+if 'db_stats' not in st.session_state:
+    st.session_state.db_stats = {}
 
 # ========== FUNCTIONS ==========
 
@@ -230,28 +239,69 @@ def debug_parse_rates(comment_text, target_date):
     }
 
 # ========== SIDEBAR ==========
-
 with st.sidebar:
     st.header("📅 Settings")
     current_date = st.date_input("Today's date", datetime.now())
     
     st.header("⚙️ Mode Selection")
-    # Changed from radio to selectbox (dropdown)
     app_mode = st.selectbox(
-    "Select Mode:",
-    options=[
-        "🔍 Rate Discrepancy Scanner",
-        "📇 Guest Email Generator",
-        # "📄 Helios Editor",
-        "📄 Police Report to XML"
-    ],
-    help="Rate Scanner: Find rate discrepancies. Guest Extractor: Extract guest names and generate emails. HeliosEditor: Edit existing invoice PDFs. Police Report: Convert police report to KHAI_BAO_TAM_TRU XML."
+        "Select Mode:",
+        options=[
+            "🔍 Rate Discrepancy Scanner",
+            "📇 Guest Email Generator",
+            "📄 Police Report to XML"
+        ],
+        help="Rate Scanner: Find rate discrepancies. Guest Extractor: Extract guest names and generate emails. Police Report: Convert police report to KHAI_BAO_TAM_TRU XML."
     )
     
     # Only show tolerance slider in Rate Scanner mode
     if app_mode == "🔍 Rate Discrepancy Scanner":
         st.header("⚙️ Tolerance")
         tolerance_percent = st.slider("Rate tolerance (%)", 0.0, 5.0, 1.0, 0.1)
+    
+    # ===== DATABASE TEST BUTTON - Only for Police Report mode =====
+    if app_mode == "📄 Police Report to XML":
+        st.header("📊 Database")
+        
+        # Test connection button
+        if st.button("🧪 Test Google Sheets Connection", use_container_width=True):
+            try:
+                from gsheets_manager import GuestDatabase
+                
+                with st.spinner("🔗 Testing connection..."):
+                    db = GuestDatabase()
+                    
+                    if db.conn:
+                        st.success("✅ Connection successful!")
+                        
+                        # Try to read data
+                        try:
+                            df = db.get_all_guests()
+                            st.info(f"📊 Found {len(df)} rows in spreadsheet")
+                            
+                            # Show a preview if there's data
+                            if not df.empty:
+                                with st.expander("📋 Preview first 5 rows"):
+                                    st.dataframe(df.head(5), use_container_width=True)
+                            else:
+                                st.info("📭 Sheet is empty")
+                                
+                        except Exception as e:
+                            st.warning(f"⚠️ Connected but couldn't read data: {e}")
+                    else:
+                        st.error("❌ Connection failed - check secrets.toml")
+                        
+            except ImportError:
+                st.error("❌ st-gsheets-connection not installed. Run: pip install st-gsheets-connection")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                import traceback
+                with st.expander("🔍 Full error details"):
+                    st.code(traceback.format_exc())
+        
+        # Connection status indicator
+        st.caption("💡 Click the button above to test connection")
+    # ===== END DATABASE SECTION =====
     
     st.header("📁 Upload")
     uploaded_file = st.file_uploader("Upload Night Audit PDF", type="pdf")

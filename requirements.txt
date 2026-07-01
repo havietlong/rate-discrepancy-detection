@@ -7,3 +7,4 @@ openpyxl
 python-docx
 weasyprint
 streamlit-ws-localstorage
+st-gsheets-connection
